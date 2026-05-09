@@ -1,0 +1,9 @@
+{
+	// See http://go.microsoft.com/fwlink/?LinkId=827846
+	// for the documentation about the extensions.json format
+	"recommendations": [
+		"JOB.amiga-debug-job",
+		"ms-vscode.cpptools",
+		"gigabates.m68k-lsp"
+	]
+}

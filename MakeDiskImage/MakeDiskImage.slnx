@@ -1,0 +1,10 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="ADFlib/bin/src/adf.vcxproj" Id="fbd7cf1e-e83e-32f1-bedb-222919c24986">
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="MakeDiskImage.vcxproj" Id="d02cc71b-1abf-4c98-8b03-045ab8ad5071" />
+</Solution>

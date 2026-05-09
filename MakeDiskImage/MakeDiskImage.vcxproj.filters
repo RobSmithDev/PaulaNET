@@ -1,0 +1,120 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="MakeDiskImage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="rlecompress.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="ADFlib\src\adf_bitm.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_blk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_blk_hd.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_byteorder.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_cache.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev_driver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev_driver_dump.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev_driver_nativ.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev_driver_ramdisk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev_drivers.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev_flop.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev_hd.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev_hdfile.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dev_type.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_dir.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_env.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_err.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_file.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_file_block.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_file_util.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_limits.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_prefix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_raw.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_str.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_types.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_util.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_vector.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_version.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adf_vol.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ADFlib\src\adflib.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

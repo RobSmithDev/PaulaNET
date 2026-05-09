@@ -1,0 +1,31 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "amiga",
+            "request": "launch",
+            "preLaunchTask": "compile",
+            "name": "Amiga 1200",
+            "config": "A1200",
+            "program": "${workspaceFolder}/${config:amiga.program}",
+            "kickstart": "${config:amiga.rom-paths.A1200}",
+            "workbench": "${config:amiga.workbench-path}",
+            "internalConsoleOptions": "openOnSessionStart",
+            "bsdSocket":true,
+            "startup":"simple.txt"
+        },
+        {
+            "type": "amiga",
+            "request": "launch",
+            "preLaunchTask": "compile",
+            "name": "Amiga 4000",
+            "config": "A4000",
+            "program": "${workspaceFolder}/${config:amiga.program}",
+            "kickstart": "${config:amiga.rom-paths.A4000}",
+            "workbench": "${config:amiga.workbench-path}",
+            "internalConsoleOptions": "openOnSessionStart",
+            "bsdSocket":true,
+            "startup":"startup-sequence-os3.1-floppy.txt"
+        }        
+    ]
+}

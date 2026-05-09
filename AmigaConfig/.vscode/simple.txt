@@ -1,0 +1,2 @@
+assign ENV: Ram:
+dh1:a.exe

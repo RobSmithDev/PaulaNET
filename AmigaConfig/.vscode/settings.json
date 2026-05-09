@@ -1,0 +1,12 @@
+{
+    "m68k.includePaths": [
+        "c:\\Users\\djrob\\.vscode\\extensions\\bartmanabyss.amiga-debug-1.7.9\\bin\\win32\\opt\\m68k-amiga-elf\\sys-include"
+    ],
+    "[m68k]": {
+        "editor.rulers": []
+    },
+    "m68k.vasm.provideDiagnostics": false,
+    "amiga.rom-paths.A1200": "f:\\rom\\Kickstart 3.0 (39.106) (A1200) (Commodore) (1992).rom",
+    "amiga.rom-paths.A4000": "f:\\rom\\Kickstart 3.0 (39.106) (A1200) (Commodore) (1992).rom",
+    "amiga.workbench-path": "F:\\rom\\wb3\\WORKBENCH.ADF"
+}

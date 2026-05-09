@@ -1,0 +1,21 @@
+; Startup-sequence for Amiga OS 3.1 for boot on floppy
+; We first make some assignments for DF0: since we have booted on DH0:
+DF0:C/assign C: DF0:C
+C:assign SYS: DF0:
+C:assign S: SYS:S
+C:assign LIBS: SYS:LIBS DH0:MUI/Libs DH0:Libs ; MUI libraries are included
+C:assign DEVS: SYS:Devs
+C:assign L: SYS:L
+; Then we make some basic assignments
+C:MakeDir RAM:T RAM:Clipboards RAM:ENV RAM:ENV/Sys
+C:assign T: RAM:T
+C:assign CLIPS: RAM:Clipboards
+C:assign ENV: RAM:ENV
+C:assign LOCALE: SYS:Locale dh0:MUI/Locale
+C:assign PRINTERS: DEVS:Printers
+; We mount the PIPE: device as it used by clib2 pipe functions (popen, pclose, etc.)
+C:Mount PIPE:
+; We increase the stack size for clib2 (mandatory if libunix is used)
+C:stack 16384
+; We activate the latest patch
+C:SetPatch QUIET

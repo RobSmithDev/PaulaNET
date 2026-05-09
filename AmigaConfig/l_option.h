@@ -1,0 +1,1 @@
+#define OPTION_USE_CLIB2 0
