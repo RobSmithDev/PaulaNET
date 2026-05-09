@@ -21,6 +21,11 @@ _____             _       _   _ ___________
 #include "paulanetstruct.h"
 #include <string.h>
 
+#include <proto/exec.h>
+#include <proto/dos.h>
+#include <stdio.h>
+#include <stdlib.h>
+
 // #define DEBUGGING 1
 #include "debug.h"
 
@@ -66,6 +71,8 @@ struct PaulaNET {
     struct PaulaNETSettings     settings;
     struct LiveStatus           status;
     UWORD*                      buffer;
+    UWORD                       lastCounter;
+    UWORD                       txCounter;
     UWORD*                      compressionSpace;
     UWORD*                      writePosition;    
     UWORD                       spaceRemaining;
@@ -83,6 +90,7 @@ struct PaulaNET {
 struct PacketsHeader {
     UBYTE numPackets;     
     UBYTE flags;    
+    UWORD counter;
 };
 
 struct CompressionHeader {
@@ -114,6 +122,20 @@ void hexDump(BPTR out, const void* data, ULONG length) {
     }
 }
 #endif
+
+// Formatted logging to console window
+static const UWORD stuffChar[] = {0x16c0, 0x4e75};
+static void logMessagef(struct PaulaNET* dev, const char *messageFormat, ...) {
+#ifdef _DEBUG	
+	char buf[100];
+    va_list args;
+    va_start(args, messageFormat);	 
+    RawDoFmt((STRPTR)messageFormat, (APTR)args, (void (*)(void))stuffChar, buf);
+	va_end(args);
+	D((buf));
+#endif	
+}
+
 
 // Calculates the checksum on some data and returns it
 static UWORD calcChecksum(UWORD* data, int bytes) {
@@ -550,6 +572,8 @@ APTR paulaNetOpen(struct ExecBase *Sysbase, struct DosLibrary *Dosbase, int devi
     tmp->device->iotd_Req.io_Flags   = 0;
     tmp->device->iotd_Req.io_Length  = 0;
     tmp->device->iotd_Req.io_Data    = NULL;
+    tmp->lastCounter = 0xFFFF;
+    tmp->txCounter = 0;
     DoIO((struct IORequest*)tmp->device);
     if (tmp->device->iotd_Req.io_Actual) {
         paulaNetClose(tmp);  
@@ -659,7 +683,7 @@ BOOL paulaNetIsAccessPointScanActive(APTR device) {
 APTR receiveFromPaulaNet(struct PaulaNET* dev, int track, int dataLen, DataMode mode, struct DataHeader* header) {
     APTR data = NULL;
 
-    // Allow retries
+    // Allow retries - this is only usually needed if somehow the track number gets out of sync
     for (int retry=0; retry<3; retry++) {
         if (retry == 2) {
             Delay(1);
@@ -669,53 +693,36 @@ APTR receiveFromPaulaNet(struct PaulaNET* dev, int track, int dataLen, DataMode 
             dev->device->iotd_Req.io_Offset  = TRACK_SEEK_OFFSET(79,TRACK_READ);
             DoIO((struct IORequest *)dev->device);
             Delay(1);
-#ifdef DEBUGGING            
-            FPrintf(Output(), "->>>> Seek to 79\n");
-#endif            
         }
-
-        // Force the correct side to be selected
-        dev->device->iotd_Req.io_Flags   = 0;
-        dev->device->iotd_Count          = 0xFFFFFFFF;
-        dev->device->iotd_Req.io_Command = TD_SEEK;
-        dev->device->iotd_Req.io_Offset  = TRACK_SEEK_OFFSET(track,TRACK_READ);
-        DoIO((struct IORequest *)dev->device);        
 
         // Read
         dev->device->iotd_Req.io_Command = ETD_RAWREAD;
         dev->device->iotd_Req.io_Flags   = IOTDF_INDEXSYNC;
         dev->device->iotd_Count          = 0xFFFFFFFF;
         dev->device->iotd_Req.io_Data    = (APTR)dev->buffer;
-        dev->device->iotd_Req.io_Length  = ((dataLen+1)&0xFFFFFFFE) + (sizeof(struct DataHeader)*2) + (PAULA_INDEX_PADDING * 4);
+        dev->device->iotd_Req.io_Length  = ((dataLen+1)&0xFFFFFFFE) + (sizeof(struct DataHeader)*2) + (PAULA_INDEX_PADDING * 2);
         if (dev->device->iotd_Req.io_Length > CHIPBUFFER_SIZE) dev->device->iotd_Req.io_Length = CHIPBUFFER_SIZE;
         if (dev->device->iotd_Req.io_Length <1024) dev->device->iotd_Req.io_Length = 1024;
         dev->device->iotd_Req.io_Offset  = TRACK_OFFSET(track, TRACK_READ);
-
-#ifdef DEBUGGING        
-        FPrintf(Output(), "Track %ld, Requested %ld bytes\n",(LONG)track, (LONG)dev->device->iotd_Req.io_Length);
-#endif        
         BYTE t = DoIO((struct IORequest *)dev->device);
     
         if (t) {
-#ifdef DEBUGGING            
-            FPrintf(Output(), "DoIO Fail %ld  Length=%ld\n", (LONG)t, (LONG)dev->device->iotd_Req.io_Length);
-#endif            
+            D(("IO Error"));
             continue;
         } else {    
             data = alignData(dev, dev->buffer, dev->device->iotd_Req.io_Length, header);
-            if (!data) continue;
+            if (!data) {
+                D(("Align Failed"));
+                continue;
+            }
         }
         if (header->dataMode != mode) {
-#ifdef DEBUGGING            
-            FPrintf(Output()," Data mode mismatch. Wanted %i, got %i\n", mode, header->dataMode);
-#endif            
+            D(("Wrong Mode"));
             continue;
         }
         return data;
     }
-#ifdef DEBUGGING    
-    FPrintf(Output(),"receiveFromPaulaNet failed\n");
-#endif    
+    D(("No Data"));
     return NULL;
 }
 
@@ -806,37 +813,6 @@ BOOL paulaNetGetStatus(APTR device, struct LiveStatus* status) {
     *status = dev->status;
     return TRUE;
 }
- 
-// Returns TRUE if any data is waiting to be read
-BOOL paulaNetIsDataWaiting(APTR device) {
-    struct PaulaNET* dev = (struct PaulaNET*)device;
-    if (!dev) return FALSE;
-    if (!paulaNetIsRequestComplete(device, FALSE)) return FALSE;
-
-    // Check actual status by seeking to the track
-    dev->device->iotd_Req.io_Command = TD_SEEK;
-    dev->device->iotd_Count          = 0xFFFFFFFF;
-    dev->device->iotd_Req.io_Flags   = 0;
-    dev->device->iotd_Req.io_Length           = 0;
-    dev->device->iotd_Req.io_Offset  = TRACK_SEEK_OFFSET(TRACK_ETHERNET, TRACK_READ);
-    if (DoIO((struct IORequest *)dev->device)) return FALSE;
-
-    // and checking the write protect status, weird I know
-    dev->device->iotd_Req.io_Flags = 0;
-    dev->device->iotd_Req.io_Command = TD_PROTSTATUS;    
-    if (DoIO((struct IORequest *)dev->device)) return FALSE;
-    // Shouldn't happen
-    if (dev->device->iotd_Req.io_Error != 0) return TRUE;
-    
-    // Check result
-    if (dev->device->iotd_Req.io_Actual) {
-        // Write protected
-        return FALSE; // No data
-    } else {
-        // Not write protected - Data waiting
-        return TRUE;
-    }
-}
 
 // Reads raw data from the device. Packets are valid until the next call
 UWORD paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallback callback) {
@@ -846,9 +822,25 @@ UWORD paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallba
 
     struct DataHeader header;
     APTR data = receiveFromPaulaNet(dev, TRACK_ETHERNET, dev->settings.maxRxSize, dmEthernet, &header );    
-    if (!data) return DEVICESTATUS_ERROR;    
+dev->device->iotd_Req.io_Flags   = 0;
+            dev->device->iotd_Count          = 0xFFFFFFFF;
+            dev->device->iotd_Req.io_Command = TD_SEEK;
+            dev->device->iotd_Req.io_Offset  = TRACK_SEEK_OFFSET(TRACK_ETHERNET,TRACK_WRITE);
+            DoIO((struct IORequest *)dev->device);
+    // Turn off the motor helps fix the pico missing amiga requests
+  //  dev->device->iotd_Req.io_Command = TD_MOTOR;
+  //  dev->device->iotd_Req.io_Length  = 0;  // 0 = motor off
+  //  DoIO((struct IORequest*)dev->device);
 
-    if (header.dataSize < 4) return DEVICESTATUS_ERROR;
+    if (!data) {
+        D(("DEVICESTATUS_ERROR"));
+        return DEVICESTATUS_ERROR;    
+    }
+
+    if (header.dataSize < 4) {
+        D(("header.dataSize < 4"));
+        return DEVICESTATUS_ERROR;
+    }
 #ifdef DEBUGGING
     FPrintf(Output(), "Compressed Size: %ld\n", (LONG)header.compressedSize);
     FPrintf(Output(), "Data Size: %ld\n", (LONG)header.dataSize);
@@ -863,6 +855,15 @@ UWORD paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallba
     pkt += sizeof(struct PacketsHeader);
     UWORD* pktEnd = (UWORD*)(((UBYTE*)pkt) + ((header.dataSize - 4)<<1));
 
+    // Skip if we've already seen this data
+    if (dev->lastCounter == pkHeader.counter) {
+        if (pkHeader.numPackets) D(("Skipping duplicate"));
+        return pkHeader.flags;
+    }
+    int number = ((int)pkHeader.counter - (int)dev->lastCounter);
+    if (number > 1) logMessagef(dev, "WARNING: %ld Receive Packets Missed", number-1);
+    dev->lastCounter = pkHeader.counter;
+    
     struct CompressionHeader cHeader;    
     for (int i=0; i<pkHeader.numPackets; i++) {
         if (pkt > pktEnd) {
@@ -886,7 +887,6 @@ UWORD paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallba
         if (realDataLength&1) realDataLength++; // has to be even
         if (((UBYTE*)pkt) + realDataLength > (UBYTE*)pktEnd) {
 #ifdef DEBUGGING
-            hexDump(Output(), (UBYTE*)pkt, 32);
             FPrintf(Output(), "Packet data content past end of buffer\n");
 #endif
             return pkHeader.flags;
@@ -911,16 +911,8 @@ UWORD paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallba
         pkt += realDataLength>>1;
     }
 
- //   // Signal packets received!
- //   dev->device->iotd_Req.io_Flags   = 0;
- //   dev->device->iotd_Count          = 0xFFFFFFFF;
- //   dev->device->iotd_Req.io_Command = TD_SEEK;
- //   dev->device->iotd_Req.io_Offset  = TRACK_SEEK_OFFSET(TRACK_ETHERNET,TRACK_WRITE);
- //   DoIO((struct IORequest *)dev->device);        
-
     return pkHeader.flags;
 }
-
 
 // Resets and prepares PaulaNET to receive some ethernet packets 
 void paulaNetBeginTransmitPackets(APTR device) {
@@ -980,8 +972,9 @@ BOOL paulaNetTransmitPackets(APTR device, BOOL wait) {
 
     // Write the packet header, this is actually after the main header
     struct PacketsHeader hdr;
+    hdr.counter = dev->txCounter++;
     hdr.numPackets = dev->buffer[0];
-    if (hdr.numPackets<1) return TRUE;  // dont both if no packets
+    
     hdr.flags = 0; // rfu
     mfmEncode((UBYTE*)&hdr, sizeof(hdr), (UWORD*)&header[1], &lastBit);
 
@@ -996,7 +989,13 @@ BOOL paulaNetTransmitPackets(APTR device, BOOL wait) {
     header->checksum = calcChecksum((UWORD*)&header[1], header->compressedSize);
     UBYTE* dataEnd = ((UBYTE*)&header[1]) + header->compressedSize;
 
-    for (int i=0; i<32; i++) *dataEnd++ = 0xAA;
+    for (int i=0; i<8; i++) *dataEnd++ = 0xAA;
+    if (header->dataSize<1024) {
+        int i= 1024-header->dataSize;
+        while (i--) *dataEnd++ = 0xAA;        
+    }
+    // Word align
+    if ((dataEnd - ((UBYTE*)dev->buffer)) & 1)  *dataEnd++ = 0xAA;        
     paulaNetIsRequestComplete(dev, TRUE);
 
     // Step 2: Transmit
@@ -1009,17 +1008,16 @@ BOOL paulaNetTransmitPackets(APTR device, BOOL wait) {
     dev->writePosition = NULL;
 
     if (wait) {
-        if (DoIO((struct IORequest *)dev->device) == 0) {
-            D(("SENTTTTT\n"));
-            return TRUE;
-        }
-        BYTE buf[16];
-        buf[0] = (dev->device->iotd_Req.io_Error<0) ? '-' : ' ';
-        buf[1] = (dev->device->iotd_Req.io_Error<0?-dev->device->iotd_Req.io_Error:dev->device->iotd_Req.io_Error) + '0';
-        buf[2] = '\n';
-        buf[3] = '\0';
-        D((buf));
-        return FALSE;
+        if (DoIO((struct IORequest *)dev->device)) {
+            // If this fails its usually the write protect bit hasnpt propergated. 
+            dev->device->iotd_Req.io_Command = ETD_RAWWRITE;
+            dev->device->iotd_Req.io_Flags   = 0;
+            dev->device->iotd_Count          = 0xFFFFFFFF;
+            dev->device->iotd_Req.io_Data    = (APTR)dev->buffer;
+            dev->device->iotd_Req.io_Length  = dataEnd - ((UBYTE*)dev->buffer);
+            dev->device->iotd_Req.io_Offset  = TRACK_OFFSET(TRACK_ETHERNET, TRACK_WRITE);
+            return DoIO((struct IORequest *)dev->device) == 0;
+        } else return TRUE;
     } else {
         SendIO((struct IORequest *)dev->device);
         dev->asyncActive = TRUE;

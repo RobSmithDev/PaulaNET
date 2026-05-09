@@ -49,9 +49,6 @@ BOOL paulaNetPutConfig(APTR device, struct PaulaNETSettings* settings);
 // Fetches the LIVE status of the device, also refreshes settings
 BOOL paulaNetGetStatus(APTR device, struct LiveStatus* status);
  
-// Returns TRUE if any data is waiting to be read
-BOOL paulaNetIsDataWaiting(APTR device);
-
 // Reads raw packets from the device. Retrns a bitmask of whats possible with the device - see DEVICESTATUS_ flags
 UWORD paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallback callback);
 

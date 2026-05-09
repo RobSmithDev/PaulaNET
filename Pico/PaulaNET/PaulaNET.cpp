@@ -159,9 +159,6 @@ ScanResult scanResults[MAX_SCAN_RESULTS];
 struct PacketQueue {
     uint8_t  packets[PACKET_QUEUE_SIZE][ETH_MTU];
     uint16_t lengths[PACKET_QUEUE_SIZE];
-#ifdef DEBUGGING
-    uint32_t stamps[PACKET_QUEUE_SIZE];
-#endif
     volatile uint32_t readIndex;
     volatile uint32_t writeIndex;
 };
@@ -169,7 +166,8 @@ struct PacketQueue {
 
 struct PacketsHeader {
     uint8_t numPackets;     
-    uint8_t flags;    
+    uint8_t flags; 
+    uint16_t counter;   
 };
 
 struct CompressionHeader {
@@ -184,9 +182,6 @@ struct CompressionHeader {
 struct CompressedPacket {
     uint8_t data[ETH_MTU_MFM_COMPRESSED];
     uint16_t length;
-#ifdef DEBUGGING
-    uint32_t stamp;
-#endif        
 };
 
 
@@ -236,10 +231,8 @@ volatile uint32_t lastStepTime;
 volatile int wifiScanCounter = 0;       // How many scans have been completed before we say its actually complete
 volatile bool isWifiConnecting = false; // Is wifi connecting?
 volatile PaulaMode paulaMode;
-
-
-int nextCompressionBufferPos = -1;      // Updated to update compressedRxQueue.readIndex at the right moment
-
+int compressionBufferIndex=-1;            // Used for temporary until the Amiga ACK the buffer
+int lastCounterFromAmiga = 0;
 
 #include "pico/sync.h"
 spin_lock_t* printLock;
@@ -398,13 +391,13 @@ void __not_in_flash_func(pinMonitor)(uint gpio, uint32_t events)  {
     switch (gpio) {       
         case PIN_SELECT:
             isSelected = (events & GPIO_IRQ_EDGE_FALL) != 0;
+            // Motor state is latched on select
+            if (isSelected) isMotorActive = gpio_get(PIN_MOTOR) == 0;            
             gpio_set_dir(PIN_READDATA, isSelected ? GPIO_OUT : GPIO_IN);
             gpio_set_dir(PIN_TRACK0, isSelected ? GPIO_OUT : GPIO_IN);
             gpio_set_dir(PIN_WRITEPROTECT, isSelected ? GPIO_OUT : GPIO_IN);
             gpio_set_dir(PIN_DISKCHANGE, isSelected ? GPIO_OUT : GPIO_IN);
             gpio_set_dir(PIN_INDEX, isSelected ? GPIO_OUT : GPIO_IN);
-            // Motor state is latched on select
-            if (isSelected) isMotorActive = gpio_get(PIN_MOTOR) == 0;            
             __dmb();
             break;
 
@@ -671,10 +664,16 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
                 PacketsHeader hdr;
                 mfmDecode((uint16_t*)dataStart, sizeof(hdr)*2, (uint8_t*)&hdr);
                 dataStart += sizeof(hdr)*2;
-                safePrintf("Receiving %i Packets...", (int)hdr.numPackets);
+
+                hdr.counter = SWAP16(hdr.counter);
+                if (lastCounterFromAmiga != hdr.counter) {
+                    int j = abs((int)hdr.counter - lastCounterFromAmiga);
+                    lastCounterFromAmiga = hdr.counter;
+                    if (j>1) safePrintf("Warning: Missed %i receive requests from the Amiga\n", j-1);
+                }
                 
                 // How many packets?
-                int len = bytesReceived - ((sizeof(DataHeader)<<1) + (sizeof(PacketsHeader)<<1));
+                int len = bytesReceived - (sizeof(DataHeader) + (sizeof(PacketsHeader)<<1));
                 if (len > header->dataSize) len = header->dataSize;
                 
                 // Extract each packet
@@ -719,9 +718,7 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
                         // Save it
                         uint16_t i = ((uint16_t)txQueue.packets[txQueue.writeIndex][12]<<8)|((uint16_t)txQueue.packets[txQueue.writeIndex][13]);   
                         txQueue.lengths[txQueue.writeIndex] = chead.originalSize;
-#ifdef DEBUGGING                        
-                        txQueue.stamps[txQueue.writeIndex] = time_us_32();
-#endif                        
+
                         __dmb();
                         txQueue.writeIndex = (txQueue.writeIndex + 1) % PACKET_QUEUE_SIZE;
                     } else {
@@ -805,32 +802,35 @@ uint32_t populateTransmitBuffer(const PaulaMode mode) {
                 dataPos = packetsHeader + (sizeof(PacketsHeader)<<1); // skip header that we'll write later
                 uint16_t packets = 0;
 				uint32_t bufferUsed = 0;
-
-                // Only when ACK'ed by the Amiga do we update this
-                nextCompressionBufferPos = compressedRxQueue.readIndex;
-                while ((nextCompressionBufferPos != compressedRxQueue.writeIndex) &&  ((bufferUsed + compressedRxQueue.packets[nextCompressionBufferPos].length) <= settings.maxTxSize)) {
-                    // Copy the packet                
-					memcpy(dataPos, compressedRxQueue.packets[nextCompressionBufferPos].data, compressedRxQueue.packets[nextCompressionBufferPos].length);
-                    bufferUsed += compressedRxQueue.packets[nextCompressionBufferPos].length;
-					dataPos += compressedRxQueue.packets[nextCompressionBufferPos].length;
-					packets++;
-                    if (packets > PACKET_QUEUE_SIZE) break; // shouldn't happen
-                    nextCompressionBufferPos = (nextCompressionBufferPos + 1) % PACKET_QUEUE_SIZE;
-#ifdef DEBUGGING                        
-                    //safePrintf("Packet took %ims to receive to Amiga\n", (time_us_32()-compressedRxQueue.packets[nextCompressionBufferPos].stamp) / 1000);
-#endif                        
-				}
-
-                safePrintf("Prepared %i Packets\n", packets);
-
-				// Encode header MFM - This probably isn't needed as Paula should still stay on track
                 PacketsHeader phdr;
+                static int lll = 0;
+
+                if (compressionBufferIndex == -1) {
+                    if (compressedRxQueue.readIndex != compressedRxQueue.writeIndex) {
+                        compressionBufferIndex = compressedRxQueue.readIndex;
+                        while ((compressionBufferIndex != compressedRxQueue.writeIndex) &&  ((bufferUsed + compressedRxQueue.packets[compressionBufferIndex].length) <= settings.maxTxSize)) {
+                            // Copy the packet                
+                            memcpy(dataPos, compressedRxQueue.packets[compressionBufferIndex].data, compressedRxQueue.packets[compressionBufferIndex].length);
+                            bufferUsed += compressedRxQueue.packets[compressionBufferIndex].length;
+                            dataPos += compressedRxQueue.packets[compressionBufferIndex].length;
+                            packets++;
+                            if (packets > PACKET_QUEUE_SIZE) break; // shouldn't happen
+                            compressionBufferIndex = (compressionBufferIndex + 1) % PACKET_QUEUE_SIZE;
+                        }
+                    }                    
+                } 
+                lll++;
+                phdr.counter = SWAP16(lll);
+
                 phdr.numPackets = packets;
-                phdr.flags = ((txQueue.writeIndex == txQueue.readIndex) ? 0 : DEVICESTATUS_CANSEND) | ((compressedRxQueue.writeIndex == nextCompressionBufferPos) ? 0 : DEVICESTATUS_CANRECEIVE);
+                             
+
+                phdr.flags = ((txQueue.writeIndex == txQueue.readIndex) ? 0 : DEVICESTATUS_CANSEND) | ((compressedRxQueue.writeIndex == compressionBufferIndex) ? 0 : DEVICESTATUS_CANRECEIVE);
 
                 uint16_t lastBit =0;
                 mfmEncode((uint8_t*)&phdr, sizeof(phdr), (uint16_t*)packetsHeader, &lastBit);
                 header.dataSize = dataPos - packetsHeader;                     
+                if (header.dataSize<1024) header.dataSize = 1024;
             }
             break;
     }
@@ -996,7 +996,7 @@ void core1Main() {
             switch (paulaMode) {
                 case PaulaMode::pmAccessPoint: setWriteProtected(wifiScanActive); break;  // Write protected while scan is active
                 case PaulaMode::pmConfig: setWriteProtected(false); break;   // Config can always be saved
-                case PaulaMode::pmEthernet: setWriteProtected(isLowerSide() ? false : compressedRxQueue.readIndex == compressedRxQueue.writeIndex); break;  // if no data then show as write protected, a bit backwards but good for signalling
+                case PaulaMode::pmEthernet: setWriteProtected(false); break;  
                 case PaulaMode::pmDisk: setWriteProtected(true);  break; // disk is always read-only  
             }
 
@@ -1020,42 +1020,34 @@ void core1Main() {
                             while ((currentTrack == track) && (currentSide == isLowerSide() && (isSelected) && (isMotorActive) && gpio_get(PIN_RESET) && dma_channel_is_busy(dma_chan)));
                             dma_channel_abort(dma_chan);
                         }
-                        gpio_put(PIN_LED_PAULAIO, 0);                        
-                        
+                        gpio_put(PIN_LED_PAULAIO, 0);                                                
                     }
                 } else
                 if (isLowerSide()) {
                     ///////////////////////////////////////////////
-                    // The Amiga  is sending us data - RECEIVE MODE
-                    if (paulaMode != PaulaMode::pmDisk) {
-                        // This handles the signal that the Amiga successfully received the last lot of packets
-                        if ((nextCompressionBufferPos>=0) && (paulaMode == PaulaMode::pmEthernet)) {
-                            compressedRxQueue.readIndex = nextCompressionBufferPos;
-                            __dmb();
-                            safePrintf("Packets ACK\n");
-                            nextCompressionBufferPos = -1;
-                            //safePrintf("Packets Received Notification\n");
+                    // The Amiga is sending us data - RECEIVE MODE
+                    // We dont care about the status of MOTOR during this, we'll just assume its good
+                    if (!gpio_get(PIN_WRITEGATE)) {                
+                        if (compressionBufferIndex>=0 && paulaMode == PaulaMode::pmEthernet) {
+                            compressedRxQueue.readIndex = compressionBufferIndex;
+                            compressionBufferIndex = -1;
                         }
-                        // We dont care about the status of MOTOR during this, we'll just assume its good
-                        if (!gpio_get(PIN_WRITEGATE)) {                
+                        gpio_put(PIN_LED_PAULAIO, 1);
+                        const PaulaMode mode = paulaMode; // capture the mode at the start
 
-                            gpio_put(PIN_LED_PAULAIO, 1);
-                            const PaulaMode mode = paulaMode; // capture the mode at the start
+                        uint32_t bytesReceived = readFromPaula();
+                        if (bytesReceived) handleDataReceived(mode, bytesReceived);
 
-                            uint32_t bytesReceived = readFromPaula();
-                            if (bytesReceived) handleDataReceived(mode, bytesReceived);
-
-                            // Wait until all data has finished being received
-                            while (!gpio_get(PIN_WRITEGATE));
-                            gpio_put(PIN_LED_PAULAIO, 0);
-                        }            
-                    }
+                        // Wait until all data has finished being received
+                        while (!gpio_get(PIN_WRITEGATE));
+                        gpio_put(PIN_LED_PAULAIO, 0);
+                    }            
                 } else {
                     if (isMotorActive) {
                         //////////////////////////////////////////////////
                         // We're sending data TO the Amiga - TRANSMIT mode
                         // Create a buffer that we can send to the Amiga 
-                        const uint32_t bufferUsed = populateTransmitBuffer(paulaMode) / 2;   // length is number of 32-bit words used
+                        const uint32_t bufferUsed = populateTransmitBuffer(paulaMode) / 2;   // length is number of 16-bit words used
                         int currentTrack = track;
                         gpio_put(PIN_LED_PAULAIO, 1);         
                                                 
@@ -1151,9 +1143,6 @@ static err_t rawEthernetReceive(struct pbuf *p, struct netif *netif) {
     if ((rxQueue.writeIndex + 1) % PACKET_QUEUE_SIZE != rxQueue.readIndex){
         pbuf_copy_partial(p, rxQueue.packets[rxQueue.writeIndex], len, 0);    
         rxQueue.lengths[rxQueue.writeIndex] = len;
-#ifdef DEBUGGING        
-        rxQueue.stamps[rxQueue.writeIndex] = time_us_32();
-#endif        
         __dmb();
         rxQueue.writeIndex = (rxQueue.writeIndex + 1) % PACKET_QUEUE_SIZE;
     }
@@ -1280,8 +1269,7 @@ int main() {
           
     while (true) {        
         handleWIFI();
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, !isMotorActive);   // LED onboard goes off when motor is active
-        //cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, gpio_get(PIN_DISKCHANGE));   // LED onboard goes off when motor is active
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, !isMotorActive);   // LED onboard goes off when motor is active        
 #ifdef DEBUGGING
         static int lastTrack = -1;
         if (lastTrack != track) {
@@ -1391,9 +1379,6 @@ int main() {
                     mfmEncode(rxQueue.packets[rxQueue.readIndex], rxQueue.lengths[rxQueue.readIndex], (uint16_t*)outputPosition, &lastBit);                     
                 }
                 compressedRxQueue.packets[compressedRxQueue.writeIndex].length += sizeof(CompressionHeader)*2;
-#ifdef DEBUGGING                
-                compressedRxQueue.packets[compressedRxQueue.writeIndex].stamp = rxQueue.stamps[rxQueue.readIndex];
-#endif                
                 __dmb();
                 compressedRxQueue.writeIndex = (compressedRxQueue.writeIndex + 1) % PACKET_QUEUE_SIZE;
                 rxQueue.readIndex = (rxQueue.readIndex + 1) % PACKET_QUEUE_SIZE;

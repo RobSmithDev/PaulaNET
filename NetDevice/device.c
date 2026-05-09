@@ -545,9 +545,6 @@ ULONG receivePacket(DEVBASEP, UBYTE* packet, USHORT packetSize, struct IOSana2Re
 	BYTE *frame_ptr;
 	BOOL broadcast;
 	ULONG res = 0;
-
-	D(("Packet Received"));
-
 	req->ios2_PacketType = ((USHORT)packet[12]<<8)|((USHORT)packet[13]);
 
 	if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
@@ -587,9 +584,13 @@ ULONG receivePacket(DEVBASEP, UBYTE* packet, USHORT packetSize, struct IOSana2Re
 	return 1;
 }
 
+int totalReceived=0;
+
+
 // Handle a received packet
 void onPacketReceived(struct devbase* db, UBYTE* packetData, int packetLength) {
 	ObtainSemaphore(&db->db_ReadListSem);	
+	totalReceived++;
 
 	USHORT packetType = ((USHORT)packetData[12]<<8)|((USHORT)packetData[13]);   
 
@@ -726,10 +727,9 @@ __saveds void frame_proc() {
 		
 	// Change task priority
 	//if (settings->taskPriority != 0) SetTaskPri((struct Task*)db->db_Proc,settings->taskPriority);      
-
+UWORD LLL = 0;
 	struct timeval timeLastWifiCheck = {0UL,0UL};
 	struct timeval timeWifiCheck = {0UL,0UL};
-
 	while (!(recv & SIGBREAKF_CTRL_C) && !db->db_quit) {
 		struct IOSana2Req *nextwrite;
 
@@ -737,8 +737,9 @@ __saveds void frame_proc() {
 		// Every 5 seconds check WIFI status and fetch settings
 		if (abs(timeWifiCheck.tv_secs-timeLastWifiCheck.tv_secs)>=5) {			
 			struct LiveStatus status;
-			if (paulaNetGetStatus(device, &status)) {
+			/*if (paulaNetGetStatus(device, &status)) {
 				paulaNetGetConfig(device, &settings);
+				paulaNetIsDataWaiting(device); // force the right track
 
 				BOOL wasOnline = db->db_online;
 				db->db_online = (status.linkStatus == LINK_STATUS_NONET) || (status.linkStatus == LINK_STATUS_UP) || (status.linkStatus == LINK_STATUS_NOIP) || (status.linkStatus == LINK_STATUS_JOIN);
@@ -749,33 +750,32 @@ __saveds void frame_proc() {
 				}
 				if (wasOnline != db->db_online) {
 					if (wasOnline) {
+						logMessage(db,"PacketServer: Reject Packets\n");
 						rejectAllPackets(db);
 						DoEvent(db, S2EVENT_OFFLINE);
 					} else {
 						GetSysTime(&db->db_DevStats.LastStart);
+						logMessage(db,"PacketServer: Online\n");
 						DoEvent(db, S2EVENT_ONLINE);
 					}
 				}
-			}
+			}*/
 			timeLastWifiCheck.tv_secs = timeWifiCheck.tv_secs;
 		}
 		
 		UBYTE morePackets = 0;
 		if (db->db_online) {			
 			USHORT counter = 0; 
-		//	D(("Waiting? "));
-		//	if (paulaNetIsDataWaiting(device)) {
-				D(("Yes "));
-				do {
-					morePackets = paulaNetReceivePackets(device, db, (PacketReceivedCallback)onPacketReceived);
-					recv = SetSignal(0, SIGBREAKF_CTRL_C|SIGBREAKF_CTRL_F);			
-				} while ((morePackets&DEVICESTATUS_CANRECEIVE) && (counter++<6) && (!recv));
-				//D(("Done!"));
-		//	} else {
-		//		recv = SetSignal(0, SIGBREAKF_CTRL_C|SIGBREAKF_CTRL_F);		
-			//	D(("No."));
-		//	}
-
+			Delay(1);
+			recv = SetSignal(0L, 0L);	
+			
+			int i = totalReceived;
+			morePackets = paulaNetReceivePackets(device, db, (PacketReceivedCallback)onPacketReceived);
+			if (morePackets == DEVICESTATUS_ERROR) D(("ERROROORORO"));				
+			if (i!=totalReceived) {
+				logMessagef(db,"%ld packets received   (%ld)", (LONG)totalReceived, (LONG)counter);
+			}
+			Delay(1);
 			// Transmit
 			if (!(recv & SIGBREAKF_CTRL_C)) {
 				int packetCount = 0;
@@ -828,37 +828,32 @@ __saveds void frame_proc() {
 					ior = nextwrite;
 				}
 				ReleaseSemaphore(&db->db_WriteListSem);
-				if (packetCount) {
-					// Send any packets found 
-					if (!paulaNetTransmitPackets(device, TRUE)) {
-						logMessagef(db, "   %ld Packets FAILED to send", (ULONG)packetCount);
-						D(("FAILED SENT"));
-						if (pendingSends) {							
-							for (struct IOSana2Req **req = pendingSends; req<pendingSendsSave; req++) {							
-								(*req)->ios2_Req.io_Error = S2ERR_TX_FAILURE; (*req)->ios2_WireError = S2WERR_GENERIC_ERROR;
-								DevTermIO(db, (struct IORequest *)(*req));
-								DoEvent(db, S2EVENT_ERROR | S2EVENT_TX | S2EVENT_HARDWARE);
-							}
+				// Send any packets found - Must ALWAYS call this to clear the receive buffer on the pico
+				if (!paulaNetTransmitPackets(device, TRUE)) {
+					logMessagef(db, "   %ld Packets FAILED to send", (ULONG)packetCount);
+					D(("FAILED SENT"));
+					if (pendingSends) {							
+						for (struct IOSana2Req **req = pendingSends; req<pendingSendsSave; req++) {							
+							(*req)->ios2_Req.io_Error = S2ERR_TX_FAILURE; (*req)->ios2_WireError = S2WERR_GENERIC_ERROR;
+							DevTermIO(db, (struct IORequest *)(*req));
+							DoEvent(db, S2EVENT_ERROR | S2EVENT_TX | S2EVENT_HARDWARE);
 						}
-					} else {
-						D(("Send"));
-						logMessagef(db, "   %ld Packets sent", (ULONG)packetCount);
-						if (pendingSends) {
-							for (struct IOSana2Req **req = pendingSends; req<pendingSendsSave; req++) {												
-								(*req)->ios2_Req.io_Error = (*req)->ios2_WireError = 0;
-								DevTermIO(db, (struct IORequest *)(*req));								
-							}
-						}
-						db->db_DevStats.PacketsSent+=packetCount;
 					}
+				} else {
+					if (pendingSends) {
+						for (struct IOSana2Req **req = pendingSends; req<pendingSendsSave; req++) {												
+							(*req)->ios2_Req.io_Error = (*req)->ios2_WireError = 0;
+							DevTermIO(db, (struct IORequest *)(*req));								
+						}
+					}
+					db->db_DevStats.PacketsSent+=packetCount;
 				}
-			}
-			recv = SetSignal(0L, 0L);
+			}			
 			if (recv & SIGBREAKF_CTRL_C) {
 				D(("Terminate Requested"));
 			} else 
 			if (!(morePackets & DEVICESTATUS_CANRECEIVE)) {
-/*				time_req->tr_time.tv_micro = 1L;
+				time_req->tr_time.tv_micro = 1L;
 				SendIO((struct IORequest *)time_req);
 				db->db_timerUsed = TRUE;
 				recv = Wait(SIGBREAKF_CTRL_C | timerSignalMask | SIGBREAKF_CTRL_F);
@@ -867,7 +862,7 @@ __saveds void frame_proc() {
 				}
 				WaitIO((struct IORequest *)time_req);  // wait until IO fully done
 				SetSignal(0, timerSignalMask); // Very important reset of timer!
-*/				
+				
 			
 			}			
 		} else {
