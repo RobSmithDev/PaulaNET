@@ -319,7 +319,7 @@ static void shiftBuffer(struct PaulaNET* dev, void* data, int length, int bitOff
 // Takes the input data and shifts it so it's aligned, then returns the start of the COMPRESSED data
 // The header is copied into the DataHeader supplied 
 // If not found, or the checksum fails, returns NULL. Output buffer is from "compression space"
-static APTR alignData(struct PaulaNET* device, void* data, int dataLength, struct DataHeader* header) {
+static APTR alignData(struct PaulaNET* device, void* data, int dataLength, struct DataHeader* header, BOOL headerOnly) {
     int offset = findDataOffset(data, dataLength);
     if (offset < 0) {
 #ifdef DEBUGGING
@@ -338,6 +338,7 @@ static APTR alignData(struct PaulaNET* device, void* data, int dataLength, struc
         mfmDecode((WORD*)dataStart, sizeof(struct DataHeader)*2, (UBYTE*)header, sizeof(struct DataHeader));        
         // Validate header
         if (header->magic != SETTINGS_MAGIC_ID) return NULL;
+        if (headerOnly) return data;
         receivedDataLength = header->compressed ? header->compressedSize : header->dataSize;
         if (receivedDataLength > dataLength - ((offset/32) + (sizeof(struct DataHeader)*2))) return NULL; 
         dataStart += sizeof(struct DataHeader) * 2; 
@@ -352,6 +353,7 @@ static APTR alignData(struct PaulaNET* device, void* data, int dataLength, struc
         offset += sizeof(struct DataHeader) * 16;        // 8 bits + mfm encoding so double  
         // Validate header
         if (header->magic != SETTINGS_MAGIC_ID) return NULL;
+        if (headerOnly) return data;
         receivedDataLength = header->compressed ? header->compressedSize : header->dataSize;
         // The below can't happen, so check early
         if (receivedDataLength> dataLength - ((offset/32) + (sizeof(struct DataHeader)*2))) return NULL; 
@@ -669,7 +671,7 @@ BOOL paulaNetIsAccessPointScanActive(APTR device) {
 }
 
 // Receive data from PaulaNET with retry
-APTR receiveFromPaulaNet(struct PaulaNET* dev, int track, int dataLen, DataMode mode, struct DataHeader* header) {
+APTR receiveFromPaulaNetOpt(struct PaulaNET* dev, int track, int dataLen, DataMode mode, struct DataHeader* header, BOOL headerOnly) {
     APTR data = NULL;
 
     // Allow retries - this is only usually needed if somehow the track number gets out of sync
@@ -699,7 +701,7 @@ APTR receiveFromPaulaNet(struct PaulaNET* dev, int track, int dataLen, DataMode 
             D(("IO Error"));
             continue;
         } else {    
-            data = alignData(dev, dev->buffer, dev->device->iotd_Req.io_Length, header);
+            data = alignData(dev, dev->buffer, dev->device->iotd_Req.io_Length, header, headerOnly);
             if (!data) {
                 D(("Align Failed"));
                 continue;
@@ -713,6 +715,10 @@ APTR receiveFromPaulaNet(struct PaulaNET* dev, int track, int dataLen, DataMode 
     }
     D(("No Data"));
     return NULL;
+}
+
+APTR receiveFromPaulaNet(struct PaulaNET* dev, int track, int dataLen, DataMode mode, struct DataHeader* header) {
+    return receiveFromPaulaNetOpt(dev, track, dataLen, mode, header, FALSE);
 }
 
 // Populates the results from the scan. Returns the number found.
@@ -807,15 +813,25 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
     if (!dev) return FALSE;
     if (!callback) return FALSE;
 
+    // header
     struct DataHeader header;
-    APTR data = receiveFromPaulaNet(dev, TRACK_ETHERNET, dev->settings.maxRxSize, dmEthernet, &header );    
 
+    // Try to query how much we need to read
+    APTR data = receiveFromPaulaNetOpt(dev, TRACK_ETHERNET, (sizeof(struct DataHeader) * 2) + PAULA_INDEX_PADDING, dmEthernet, &header, TRUE); 
+    if (!data) return FALSE;
 
+    // ABORT and RESET
     dev->device->iotd_Req.io_Flags   = 0;
-            dev->device->iotd_Count          = 0xFFFFFFFF;
-            dev->device->iotd_Req.io_Command = TD_SEEK;
-            dev->device->iotd_Req.io_Offset  = TRACK_SEEK_OFFSET(TRACK_ETHERNET,TRACK_WRITE);
-            DoIO((struct IORequest *)dev->device);
+    dev->device->iotd_Count          = 0xFFFFFFFF;
+    dev->device->iotd_Req.io_Command = TD_SEEK;
+    dev->device->iotd_Req.io_Offset  = TRACK_SEEK_OFFSET(TRACK_ETHERNET,TRACK_WRITE);
+    DoIO((struct IORequest *)dev->device);
+
+    // Now collect the required number of bytes - *should* be quicker
+    int size = header.compressedSize + (sizeof(struct DataHeader) * 2) + PAULA_INDEX_PADDING;
+
+    data = receiveFromPaulaNet(dev, TRACK_ETHERNET, size, dmEthernet, &header );    
+
     // Turn off the motor helps fix the pico missing amiga requests
   //  dev->device->iotd_Req.io_Command = TD_MOTOR;
   //  dev->device->iotd_Req.io_Length  = 0;  // 0 = motor off
@@ -899,8 +915,6 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
 
         pkt += realDataLength>>1;
     }
-
-    if (pkHeader.numPackets) logMessagef(dev, "Received %ld packets", pkHeader.numPackets);
 
     return TRUE;
 }
@@ -997,8 +1011,6 @@ BOOL paulaNetTransmitPackets(APTR device) {
     dev->device->iotd_Req.io_Data    = (APTR)dev->packetBackup;
     dev->device->iotd_Req.io_Length  = dataEnd - ((UBYTE*)dev->packetBackup);
     dev->device->iotd_Req.io_Offset  = TRACK_OFFSET(TRACK_ETHERNET, TRACK_WRITE);
-
-    if (hdr.numPackets) logMessagef(dev, "Transmit %ld packets", hdr.numPackets);
 
     if (DoIO((struct IORequest *)dev->device)) {
         // If this fails its usually the write protect bit hasnpt propergated. 
