@@ -817,7 +817,7 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
     struct DataHeader header;
 
     // Try to query how much we need to read
-    APTR data = receiveFromPaulaNetOpt(dev, TRACK_ETHERNET, (sizeof(struct DataHeader) * 2) + PAULA_INDEX_PADDING, dmEthernet, &header, TRUE); 
+    APTR data = receiveFromPaulaNetOpt(dev, TRACK_ETHERNET, 0, dmEthernet, &header, TRUE); 
     if (!data) return FALSE;
 
     // ABORT and RESET
@@ -828,14 +828,10 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
     DoIO((struct IORequest *)dev->device);
 
     // Now collect the required number of bytes - *should* be quicker
-    int size = header.compressedSize + (sizeof(struct DataHeader) * 2) + PAULA_INDEX_PADDING;
+    int size = header.compressedSize;
 
     data = receiveFromPaulaNet(dev, TRACK_ETHERNET, size, dmEthernet, &header );    
 
-    // Turn off the motor helps fix the pico missing amiga requests
-  //  dev->device->iotd_Req.io_Command = TD_MOTOR;
-  //  dev->device->iotd_Req.io_Length  = 0;  // 0 = motor off
-  //  DoIO((struct IORequest*)dev->device);
 
     if (!data) {
         D(("DEVICESTATUS_ERROR"));
