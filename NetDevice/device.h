@@ -44,7 +44,6 @@ struct devbase {
 	
 	BOOL db_decrementCountOnFail;
 	BOOL db_quit;
-	BOOL db_timerUsed;
 		
 	volatile USHORT db_online;
 	

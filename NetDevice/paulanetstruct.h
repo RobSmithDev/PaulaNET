@@ -35,8 +35,8 @@ struct ScanResults {
     UWORD count;
 };
 
-#define MAX_TRANSFER_SIZE           16384
-#define MIN_TRANSFER_SIZE           2048
+#define MAX_TRANSFER_SIZE           8192
+#define MIN_TRANSFER_SIZE           1536
 #define ETH_MTU                     1518    // 1500 + ethernet header + some margin
 #define MAX_PACKETS_PER_CALL        20      // Max packets to send or receive in one go
 

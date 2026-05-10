@@ -78,7 +78,7 @@ Head Selection:
 
 // MAX number of bytes we'll receive/send at a time from DMA
 #define MAX_TRANSFER_SIZE           16384
-#define MIN_TRANSFER_SIZE           2048
+#define MIN_TRANSFER_SIZE           1536
 
 #define PAULA_INDEX_PADDING         120         // Padding to add at the start of any data sent to the Amiga + PLL lock
 #define PAULA_MAX_BYTES             (MAX_TRANSFER_SIZE + (PAULA_INDEX_PADDING * 8))
@@ -110,7 +110,7 @@ struct PaulaNETSettings {
     char            ssid[34];       // 32 + null + 1 for padding
     char            pwd[66];        // 64 + null + 1 for padding
     char            hostname[34];   // 32 + null + 1 for padding
-    uint16_t         flags;          // Settings
+    uint16_t        flags;          // Settings
     uint16_t        maxRxSize;      // Max size of data we'll receive from the Amiga in one go
     uint16_t        maxTxSize;      // Max size of data we'll transfer to the Amiga in one go
 };
@@ -155,10 +155,15 @@ ScanResult scanResults[MAX_SCAN_RESULTS];
 #define PACKET_QUEUE_SIZE   20
 #define ETH_MTU             1518  // 1500 + ethernet header + some margin
 
+// A single packet, as it's sent or received
+struct Packet {
+    uint8_t data[ETH_MTU];
+    uint16_t length;
+};
+
 // To store packets
 struct PacketQueue {
-    uint8_t  packets[PACKET_QUEUE_SIZE][ETH_MTU];
-    uint16_t lengths[PACKET_QUEUE_SIZE];
+    Packet  packets[PACKET_QUEUE_SIZE];
     volatile uint32_t readIndex;
     volatile uint32_t writeIndex;
 };
@@ -167,7 +172,8 @@ struct PacketQueue {
 struct PacketsHeader {
     uint8_t numPackets;     
     uint8_t flags; 
-    uint16_t counter;   
+    uint8_t amigaCounter; 
+    uint8_t picoCounter;
 };
 
 struct CompressionHeader {
@@ -178,13 +184,13 @@ struct CompressionHeader {
 
 #define ETH_MTU_MFM_COMPRESSED   ((ETH_MTU<<1) + 4 + (sizeof(CompressionHeader)<<1))
 
-
+// Data for each packet to be sent, as it's pre-compressed
 struct CompressedPacket {
     uint8_t data[ETH_MTU_MFM_COMPRESSED];
     uint16_t length;
 };
 
-
+// All packets to be compressed
 struct CompressedQueue {
     CompressedPacket packets[PACKET_QUEUE_SIZE];
     volatile uint32_t readIndex;
@@ -212,6 +218,10 @@ absolute_time_t wifiIOLedOff = {0};
 static uint8_t IoBuffer[PAULA_MAX_BYTES];
 // To write data to before being compressed.
 static uint8_t CompressBuffer[PAULA_MAX_BYTES];
+// Backup of packets to be sent
+static uint8_t PacketBackup[PAULA_MAX_BYTES];
+static uint16_t PacketBackupSize = 0;
+PacketsHeader packetHeaderSend;
 
 // Compression buffers
 static uint8_t Core0RunBuffer[RUN_BUFFER_SIZE];
@@ -231,8 +241,9 @@ volatile uint32_t lastStepTime;
 volatile int wifiScanCounter = 0;       // How many scans have been completed before we say its actually complete
 volatile bool isWifiConnecting = false; // Is wifi connecting?
 volatile PaulaMode paulaMode;
-int compressionBufferIndex=-1;            // Used for temporary until the Amiga ACK the buffer
-int lastCounterFromAmiga = 0;
+uint8_t lastAmigaCounter = 0xFF;
+uint8_t lastPicoCounter = 0x7F;
+
 
 #include "pico/sync.h"
 spin_lock_t* printLock;
@@ -384,6 +395,11 @@ void reset() {
     memset(&txQueue, 0, sizeof(txQueue));
     memset(&rxQueue, 0, sizeof(rxQueue));
     memset(&compressedRxQueue, 0, sizeof(compressedRxQueue));
+    memset(&PacketBackup, 0, sizeof(PacketBackup));
+    memset(PacketBackup, 0xAA, PAULA_INDEX_PADDING);
+    uint16_t* b = (uint16_t*)&PacketBackup[PAULA_INDEX_PADDING];
+    b[0] = 0x4489;
+    b[1] = 0x4489;
 }
 
 // ISR for monitoring some of the pins in a timely fashion - This is ran on CORE0
@@ -665,81 +681,147 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
                 mfmDecode((uint16_t*)dataStart, sizeof(hdr)*2, (uint8_t*)&hdr);
                 dataStart += sizeof(hdr)*2;
 
-                hdr.counter = SWAP16(hdr.counter);
-                if (lastCounterFromAmiga != hdr.counter) {
-                    int j = abs((int)hdr.counter - lastCounterFromAmiga);
-                    lastCounterFromAmiga = hdr.counter;
-                    if (j>1) safePrintf("Warning: Missed %i receive requests from the Amiga\n", j-1);
-                }
-                
-                // How many packets?
-                int len = bytesReceived - (sizeof(DataHeader) + (sizeof(PacketsHeader)<<1));
-                if (len > header->dataSize) len = header->dataSize;
-                
-                // Extract each packet
-                CompressionHeader chead;                
-			    while (hdr.numPackets) {
-                    // Enough room left?
-                    if (header->dataSize < sizeof(chead)<<1) {
-                        safePrintf("Ran out of data when reading packets. %i remaining\n", hdr.numPackets);
-                        return false;
-                        break;
-                    }
-
-                    // Extract compression header
-                    mfmDecode((uint16_t*)dataStart, sizeof(chead)<<1, (uint8_t*)&chead);
-                    dataStart += sizeof(chead)<<1;
-                    len -= sizeof(chead)<<1;
-                    chead.originalSize = SWAP16(chead.originalSize);
-                    chead.compressedSize = SWAP16(chead.compressedSize);
-
-                    // Now extract each ethernet packet
-				    uint16_t compressedSize = chead.compressedSize & 0x7FFF;  // MSB explains compression mode
-                    if (compressedSize > len) {
-                        safePrintf("Ran out of data reading packet data. Required %i, remaining %i\n", compressedSize, len);
-                        return false;
-                    }
-
-                    // Is there any space? Ideally we dont want to wait here, but 1ms should be enough to make some space
-                    if ((txQueue.writeIndex + 1) % PACKET_QUEUE_SIZE == txQueue.readIndex) sleep_ms(1);
-
-                    // Space now?
-                    if ((txQueue.writeIndex + 1) % PACKET_QUEUE_SIZE != txQueue.readIndex) {
-                        if (chead.compressedSize & 0x8000) {
-                            // Packet is compressed
-                            if (rleDecompress((uint8_t*)dataStart, compressedSize, txQueue.packets[txQueue.writeIndex], ETH_MTU) != chead.originalSize) {
-                                safePrintf("Packet received was decompressed to incorrect size");
-                                return false;
-                            } 
-                        } else {
-                            // Packet is MFM encoded
-                            mfmDecode((uint16_t*)dataStart, compressedSize, txQueue.packets[txQueue.writeIndex]);
+                // Is the Amiga ACK our current packets buffer? Yes it might be
+                if (hdr.picoCounter == lastPicoCounter) PacketBackupSize = 0;
+                // Have we seen this one before?
+                if (hdr.amigaCounter != lastAmigaCounter) {
+                    lastAmigaCounter = hdr.amigaCounter;
+                    // How many packets?
+                    int len = bytesReceived - (sizeof(DataHeader) + (sizeof(PacketsHeader)<<1));
+                    if (len > header->dataSize) len = header->dataSize;
+                    
+                    // Extract each packet
+                    CompressionHeader chead;                
+                    while (hdr.numPackets) {
+                        // Enough room left?
+                        if (header->dataSize < sizeof(chead)<<1) {
+                            safePrintf("Ran out of data when reading packets. %i remaining\n", hdr.numPackets);
+                            return false;
+                            break;
                         }
-                        // Save it
-                        uint16_t i = ((uint16_t)txQueue.packets[txQueue.writeIndex][12]<<8)|((uint16_t)txQueue.packets[txQueue.writeIndex][13]);   
-                        txQueue.lengths[txQueue.writeIndex] = chead.originalSize;
 
-                        __dmb();
-                        txQueue.writeIndex = (txQueue.writeIndex + 1) % PACKET_QUEUE_SIZE;
-                    } else {
-                         safePrintf("Packet queue full, dropping packet");
-                         return false;
+                        // Extract compression header
+                        mfmDecode((uint16_t*)dataStart, sizeof(chead)<<1, (uint8_t*)&chead);
+                        dataStart += sizeof(chead)<<1;
+                        len -= sizeof(chead)<<1;
+                        chead.originalSize = SWAP16(chead.originalSize);
+                        chead.compressedSize = SWAP16(chead.compressedSize);
+
+                        // Now extract each ethernet packet
+                        uint16_t compressedSize = chead.compressedSize & 0x7FFF;  // MSB explains compression mode
+                        if (compressedSize > len) {
+                            safePrintf("Ran out of data reading packet data. Required %i, remaining %i\n", compressedSize, len);
+                            return false;
+                        }
+
+                        // Is there any space? Ideally we dont want to wait here, but 1ms should be enough to make some space
+                        if ((txQueue.writeIndex + 1) % PACKET_QUEUE_SIZE == txQueue.readIndex) sleep_ms(1);
+
+                        // Space now?
+                        if ((txQueue.writeIndex + 1) % PACKET_QUEUE_SIZE != txQueue.readIndex) {
+                            if (chead.compressedSize & 0x8000) {
+                                // Packet is compressed
+                                if (rleDecompress((uint8_t*)dataStart, compressedSize, txQueue.packets[txQueue.writeIndex].data, ETH_MTU) != chead.originalSize) {
+                                    safePrintf("Packet received was decompressed to incorrect size");
+                                    return false;
+                                } 
+                            } else {
+                                // Packet is MFM encoded
+                                mfmDecode((uint16_t*)dataStart, compressedSize, txQueue.packets[txQueue.writeIndex].data);
+                            }
+                            // Save it
+                            txQueue.packets[txQueue.writeIndex].length = chead.originalSize;
+
+                            __dmb();
+                            txQueue.writeIndex = (txQueue.writeIndex + 1) % PACKET_QUEUE_SIZE;
+                        } else {
+                            safePrintf("Packet queue full, dropping packet");
+                            return false;
+                        }
+                        dataStart += compressedSize;
+                        len -= compressedSize;
+
+                        // Must be on an even boundary
+                        if (compressedSize&1) {
+                            dataStart++;
+                            len --;
+                        }                
+                        hdr.numPackets--;
                     }
-                    dataStart += compressedSize;
-                    len -= compressedSize;
-
-                    // Must be on an even boundary
-                    if (compressedSize&1) {
-                        dataStart++;
-                        len --;
-                    }                
-                    hdr.numPackets--;
                 }
 			}
             return true;
             break;            
     }
     return false;
+}
+ 
+// Prepares PacketBackup buffer for packets to transmit. When finished this buffer is RAW mfm ready to be streamed.
+void preparePacketsToTransmit() {
+    if (PacketBackupSize) return; // already set? it's already ready
+    lastPicoCounter++;
+
+    // Pointer to whre data starts
+    uint8_t* headerStart = (uint8_t*)&PacketBackup[ PAULA_INDEX_PADDING + 4];
+    uint8_t* dataStart = headerStart +  (sizeof(DataHeader)*2);
+    uint8_t* dataPos = dataStart;
+    dataPos += sizeof(packetHeaderSend)<<1; // skip past the packet header, we'll do that later
+
+    // Populate the start of the packet header
+    packetHeaderSend.numPackets = 0;
+    packetHeaderSend.picoCounter = lastPicoCounter;
+
+    // NOTE: cycleCounterRX will need filling at the time of send incase it changes
+    int bufferUsed = sizeof(packetHeaderSend)<<1;
+
+    while ((compressedRxQueue.readIndex != compressedRxQueue.writeIndex) && ((bufferUsed + compressedRxQueue.packets[compressedRxQueue.readIndex].length) < settings.maxTxSize) && (packetHeaderSend.numPackets < PACKET_QUEUE_SIZE)) {
+        // Copy the packet                
+        memcpy(dataPos, compressedRxQueue.packets[compressedRxQueue.readIndex].data, compressedRxQueue.packets[compressedRxQueue.readIndex].length);
+        bufferUsed += compressedRxQueue.packets[compressedRxQueue.readIndex].length;
+        dataPos += compressedRxQueue.packets[compressedRxQueue.readIndex].length;
+        packetHeaderSend.numPackets++;
+        compressedRxQueue.readIndex = (compressedRxQueue.readIndex + 1) % PACKET_QUEUE_SIZE;
+    }
+    __dmb();
+
+    // Total number of bytes in the payload
+    PacketBackupSize = dataPos - dataStart;
+}
+
+// Populate IoBuffer and return the total number of bytes to transmit
+uint32_t populateTransmitBufferForPackets() {   
+    uint8_t* headerStart = (uint8_t*)&PacketBackup[ PAULA_INDEX_PADDING + 4];
+    uint8_t* dataStart = headerStart +  (sizeof(DataHeader)*2);    
+
+    preparePacketsToTransmit();
+    packetHeaderSend.flags = ((txQueue.writeIndex == txQueue.readIndex) ? 0 : DEVICESTATUS_CANSEND) | ((compressedRxQueue.writeIndex == compressedRxQueue.readIndex) ? 0 : DEVICESTATUS_CANRECEIVE);
+    packetHeaderSend.amigaCounter = lastAmigaCounter;  // send what the amiga last sent us
+
+    uint16_t lastBit = 0;
+    mfmEncode((uint8_t*)&packetHeaderSend, sizeof(packetHeaderSend), (uint16_t*)dataStart, &lastBit);
+
+    DataHeader header;
+    header.dataMode = DataMode::dmEthernet;  
+    header.magic = SWAP32(SETTINGS_MAGIC_ID);
+    header.dataSize = PacketBackupSize;        
+    header.compressed = 0;          // Raw
+    int compressSize = header.dataSize;
+    header.compressedSize = SWAP16(header.dataSize);   
+    header.checksum = SWAP16(calculateChecksum((uint16_t*)dataStart, header.dataSize));    
+    header.dataSize = SWAP16(header.dataSize);
+
+    lastBit = 0;
+    mfmEncode((const uint8_t*)&header, sizeof(header), (uint16_t*)headerStart, &lastBit);
+
+    dataStart += compressSize;     
+    
+    int dataLength = (dataStart - PacketBackup) + PAULA_INDEX_PADDING;
+    if (dataLength > PAULA_MAX_BYTES) dataLength = PAULA_MAX_BYTES;
+    dataLength -= (dataStart - PacketBackup);
+    if (dataLength) memset(dataStart, 0xAA, dataLength);
+    dataStart += dataLength;
+       
+    return dataStart - PacketBackup;
 }
 
 // Populate IoBuffer and return number of bytes saved to it
@@ -794,45 +876,7 @@ uint32_t populateTransmitBuffer(const PaulaMode mode) {
                 header.dataSize = dataPos - CompressBuffer;
                 //safePrintf("Prepared buffer for config and status\n");
             }
-            break;
-        case PaulaMode::pmEthernet:
-            header.dataMode = DataMode::dmEthernet;  
-            {
-                uint8_t* packetsHeader = ((uint8_t*)syncPos) + (sizeof(header)*2);
-                dataPos = packetsHeader + (sizeof(PacketsHeader)<<1); // skip header that we'll write later
-                uint16_t packets = 0;
-				uint32_t bufferUsed = 0;
-                PacketsHeader phdr;
-                static int lll = 0;
-
-                if (compressionBufferIndex == -1) {
-                    if (compressedRxQueue.readIndex != compressedRxQueue.writeIndex) {
-                        compressionBufferIndex = compressedRxQueue.readIndex;
-                        while ((compressionBufferIndex != compressedRxQueue.writeIndex) &&  ((bufferUsed + compressedRxQueue.packets[compressionBufferIndex].length) <= settings.maxTxSize)) {
-                            // Copy the packet                
-                            memcpy(dataPos, compressedRxQueue.packets[compressionBufferIndex].data, compressedRxQueue.packets[compressionBufferIndex].length);
-                            bufferUsed += compressedRxQueue.packets[compressionBufferIndex].length;
-                            dataPos += compressedRxQueue.packets[compressionBufferIndex].length;
-                            packets++;
-                            if (packets > PACKET_QUEUE_SIZE) break; // shouldn't happen
-                            compressionBufferIndex = (compressionBufferIndex + 1) % PACKET_QUEUE_SIZE;
-                        }
-                    }                    
-                } 
-                lll++;
-                phdr.counter = SWAP16(lll);
-
-                phdr.numPackets = packets;
-                             
-
-                phdr.flags = ((txQueue.writeIndex == txQueue.readIndex) ? 0 : DEVICESTATUS_CANSEND) | ((compressedRxQueue.writeIndex == compressionBufferIndex) ? 0 : DEVICESTATUS_CANRECEIVE);
-
-                uint16_t lastBit =0;
-                mfmEncode((uint8_t*)&phdr, sizeof(phdr), (uint16_t*)packetsHeader, &lastBit);
-                header.dataSize = dataPos - packetsHeader;                     
-                if (header.dataSize<1024) header.dataSize = 1024;
-            }
-            break;
+            break;       
     }
 
     // Odd?
@@ -844,23 +888,16 @@ uint32_t populateTransmitBuffer(const PaulaMode mode) {
     // Compress the buffer directly into the output
     uint16_t lastBit = 0;
     int compressSize;
-    if (header.dataMode == DataMode::dmEthernet) {
-        header.compressed = 0;          // Raw
-        compressSize = header.dataSize;
-        header.compressedSize = SWAP16(header.dataSize);   
-        header.checksum = SWAP16(calculateChecksum((uint16_t*)(((uint8_t*)syncPos) + (sizeof(header)*2)), header.dataSize));
-    } else {        
-        if (settings.flags & FLAGS_PICO_COMPRESSION) {
-            header.compressed = 1;  // Compressed
-            compressSize = header.dataSize ? rleCompress(CompressBuffer, header.dataSize, ((uint8_t*)syncPos) + (sizeof(header)*2), true, Core1RunBuffer) : 0;
-        } else {
-            header.compressed = 2;  // MFM
-            compressSize = header.dataSize ? mfmEncode(CompressBuffer, header.dataSize, (uint16_t*)(((uint8_t*)syncPos) + (sizeof(header)*2)), &lastBit) : 0;
-        }
-        // Calculate the checksum on the compressed buffer
-        header.checksum = SWAP16(calculateChecksum((uint16_t*)(((uint8_t*)syncPos) + (sizeof(header)*2)), compressSize));
-        header.compressedSize = SWAP16(compressSize);
+    if (settings.flags & FLAGS_PICO_COMPRESSION) {
+        header.compressed = 1;  // Compressed
+        compressSize = header.dataSize ? rleCompress(CompressBuffer, header.dataSize, ((uint8_t*)syncPos) + (sizeof(header)*2), true, Core1RunBuffer) : 0;
+    } else {
+        header.compressed = 2;  // MFM
+        compressSize = header.dataSize ? mfmEncode(CompressBuffer, header.dataSize, (uint16_t*)(((uint8_t*)syncPos) + (sizeof(header)*2)), &lastBit) : 0;
     }
+    // Calculate the checksum on the compressed buffer
+    header.checksum = SWAP16(calculateChecksum((uint16_t*)(((uint8_t*)syncPos) + (sizeof(header)*2)), compressSize));
+    header.compressedSize = SWAP16(compressSize);
     
     header.dataSize = SWAP16(header.dataSize);
 
@@ -875,8 +912,7 @@ uint32_t populateTransmitBuffer(const PaulaMode mode) {
         dataPos += settings.maxTxSize - len;
     }
     memset(dataPos, 0xAA, PAULA_INDEX_PADDING+PAULA_INDEX_PADDING);
-    dataPos += PAULA_INDEX_PADDING+PAULA_INDEX_PADDING;
-   
+    dataPos += PAULA_INDEX_PADDING+PAULA_INDEX_PADDING;   
     return dataPos - IoBuffer;
 }
 
@@ -1028,10 +1064,6 @@ void core1Main() {
                     // The Amiga is sending us data - RECEIVE MODE
                     // We dont care about the status of MOTOR during this, we'll just assume its good
                     if (!gpio_get(PIN_WRITEGATE)) {                
-                        if (compressionBufferIndex>=0 && paulaMode == PaulaMode::pmEthernet) {
-                            compressedRxQueue.readIndex = compressionBufferIndex;
-                            compressionBufferIndex = -1;
-                        }
                         gpio_put(PIN_LED_PAULAIO, 1);
                         const PaulaMode mode = paulaMode; // capture the mode at the start
 
@@ -1047,16 +1079,23 @@ void core1Main() {
                         //////////////////////////////////////////////////
                         // We're sending data TO the Amiga - TRANSMIT mode
                         // Create a buffer that we can send to the Amiga 
-                        const uint32_t bufferUsed = populateTransmitBuffer(paulaMode) / 2;   // length is number of 16-bit words used
+                        uint32_t bufferUsed;
                         int currentTrack = track;
+
+                        if (paulaMode == PaulaMode::pmEthernet) {
+                            bufferUsed = populateTransmitBufferForPackets() / 2;   // length is number of 16-bit words use
+                        } else {
+                            bufferUsed = populateTransmitBuffer(paulaMode) / 2;   // length is number of 16-bit words used
+                        }
+                        sleep_ms(1);
                         gpio_put(PIN_LED_PAULAIO, 1);         
                                                 
                         // Now we keep re-transmitting the same buffer over and over until MOTOR goes off or something else changes.
                         while ((!isLowerSide()) && (isSelected) && gpio_get(PIN_RESET) && isMotorActive && (currentTrack == track)) {
                             // Start transmission
                             gpio_put(PIN_INDEX, 0);   // index is used to help sync the data stream
-                            dma_channel_configure(dma_chan, &cfg, &pioFloppyTX.pio->txf[pioFloppyTX.sm],IoBuffer,bufferUsed,true);
-                            sleep_us(3000);   // wait 3ms, this allows the index to work properly.
+                            dma_channel_configure(dma_chan, &cfg, &pioFloppyTX.pio->txf[pioFloppyTX.sm],  (paulaMode == PaulaMode::pmEthernet) ? PacketBackup : IoBuffer,bufferUsed,true);
+                            sleep_us(1000);   // wait 3ms, this allows the index to work properly.
                             gpio_put(PIN_INDEX, 1);
 
                             // Wait for one of these states to change
@@ -1141,8 +1180,8 @@ static err_t rawEthernetReceive(struct pbuf *p, struct netif *netif) {
     flashWifiIO();
 
     if ((rxQueue.writeIndex + 1) % PACKET_QUEUE_SIZE != rxQueue.readIndex){
-        pbuf_copy_partial(p, rxQueue.packets[rxQueue.writeIndex], len, 0);    
-        rxQueue.lengths[rxQueue.writeIndex] = len;
+        pbuf_copy_partial(p, rxQueue.packets[rxQueue.writeIndex].data, len, 0);    
+        rxQueue.packets[rxQueue.writeIndex].length = len;
         __dmb();
         rxQueue.writeIndex = (rxQueue.writeIndex + 1) % PACKET_QUEUE_SIZE;
     }
@@ -1328,7 +1367,7 @@ int main() {
         // Check for packets to send from core 1
         if (txQueue.readIndex != txQueue.writeIndex) {
             flashWifiIO();
-            cyw43_send_ethernet(&cyw43_state, CYW43_ITF_STA, txQueue.lengths[txQueue.readIndex], txQueue.packets[txQueue.readIndex], false);    
+            cyw43_send_ethernet(&cyw43_state, CYW43_ITF_STA, txQueue.packets[txQueue.readIndex].length, txQueue.packets[txQueue.readIndex].data, false); 
             txQueue.readIndex = (txQueue.readIndex + 1) % PACKET_QUEUE_SIZE;
         }
 
@@ -1357,11 +1396,11 @@ int main() {
         if (rxQueue.readIndex != rxQueue.writeIndex) {
             if ((compressedRxQueue.writeIndex + 1) % PACKET_QUEUE_SIZE != compressedRxQueue.readIndex) {              
                 CompressionHeader hdr;
-                hdr.originalSize = SWAP16(rxQueue.lengths[rxQueue.readIndex]);
+                hdr.originalSize = SWAP16(rxQueue.packets[rxQueue.readIndex].length);
                 uint8_t* outputPosition = &compressedRxQueue.packets[compressedRxQueue.writeIndex].data[sizeof(CompressionHeader) * 2];
                 // Prep compress and encode each packet for transmission
                 if (settings.flags & FLAGS_PICO_COMPRESSION) {
-                    compressedRxQueue.packets[compressedRxQueue.writeIndex].length = rleCompress(rxQueue.packets[rxQueue.readIndex], rxQueue.lengths[rxQueue.readIndex], outputPosition, true, Core0RunBuffer);
+                    compressedRxQueue.packets[compressedRxQueue.writeIndex].length = rleCompress(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, outputPosition, true, Core0RunBuffer);
                     hdr.compressedSize = SWAP16(compressedRxQueue.packets[compressedRxQueue.writeIndex].length);                    
                     // WORD padding
                     if (compressedRxQueue.packets[compressedRxQueue.writeIndex].length&1) {
@@ -1371,12 +1410,12 @@ int main() {
                     uint16_t lastBit = 0;
                     mfmEncode((uint8_t*)&hdr, sizeof(hdr), (uint16_t*)compressedRxQueue.packets[compressedRxQueue.writeIndex].data, &lastBit);
                 } else {
-                    compressedRxQueue.packets[compressedRxQueue.writeIndex].length = rxQueue.lengths[rxQueue.readIndex] << 1; 
+                    compressedRxQueue.packets[compressedRxQueue.writeIndex].length = rxQueue.packets[rxQueue.readIndex].length << 1; 
                     hdr.compressedSize = SWAP16(compressedRxQueue.packets[compressedRxQueue.writeIndex].length | 0x8000);  // MFM
                     // Encode the header
                     uint16_t lastBit = 0;
                     mfmEncode((uint8_t*)&hdr, sizeof(hdr), (uint16_t*)compressedRxQueue.packets[compressedRxQueue.writeIndex].data, &lastBit);
-                    mfmEncode(rxQueue.packets[rxQueue.readIndex], rxQueue.lengths[rxQueue.readIndex], (uint16_t*)outputPosition, &lastBit);                     
+                    mfmEncode(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, (uint16_t*)outputPosition, &lastBit);                     
                 }
                 compressedRxQueue.packets[compressedRxQueue.writeIndex].length += sizeof(CompressionHeader)*2;
                 __dmb();

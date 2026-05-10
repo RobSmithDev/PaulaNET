@@ -22,9 +22,6 @@ _____             _       _   _ ___________
 // Searches the system for the PaulaNET device, if found it returns an open handle to it
 APTR paulaNetFindAndOpen(struct ExecBase *Sysbase, struct DosLibrary *Dosbase);
 
-// Checks and optionally waits for an async operation to complete
-BOOL paulaNetIsRequestComplete(APTR device, BOOL wait);
-
 // Close the PaulaNET device
 void paulaNetClose(APTR device);
 
@@ -50,17 +47,18 @@ BOOL paulaNetPutConfig(APTR device, struct PaulaNETSettings* settings);
 BOOL paulaNetGetStatus(APTR device, struct LiveStatus* status);
  
 // Reads raw packets from the device. Retrns a bitmask of whats possible with the device - see DEVICESTATUS_ flags
-UWORD paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallback callback);
+BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallback callback);
 
-// Resets and prepares PaulaNET to receive some ethernet packets - You cant call anything above whilst between this and paulaNetTransmitPackets
-void paulaNetBeginTransmitPackets(APTR device);
+// Resets and prepares PaulaNET to receive some ethernet packets 
+// returns FALSE if the previous buffer needs to be re-sent.
+BOOL paulaNetBeginTransmitPackets(APTR device);
 
   // Add a packet to be sent to PaulaNET and returns how much space is left. packetLength cannot be larger than ETH_MTU
 // Returns if theres space for another. If false or you have no more you should call paulaNetTransmitPackets
 BOOL paulaNetAddPacket(APTR device, void* data, UWORD packetLength);
 
   // Sends the packets you have queued using paulaNetAddPacket - Assumes you checked if can first
-BOOL paulaNetTransmitPackets(APTR device, BOOL wait);
+BOOL paulaNetTransmitPackets(APTR device);
 
 
 

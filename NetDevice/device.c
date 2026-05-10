@@ -584,13 +584,9 @@ ULONG receivePacket(DEVBASEP, UBYTE* packet, USHORT packetSize, struct IOSana2Re
 	return 1;
 }
 
-int totalReceived=0;
-
-
 // Handle a received packet
 void onPacketReceived(struct devbase* db, UBYTE* packetData, int packetLength) {
 	ObtainSemaphore(&db->db_ReadListSem);	
-	totalReceived++;
 
 	USHORT packetType = ((USHORT)packetData[12]<<8)|((USHORT)packetData[13]);   
 
@@ -654,31 +650,23 @@ __saveds void frame_proc() {
 	// hold it for its entire lifetime, otherwise the process exit won't be arbitrated properly.
 	ObtainSemaphore(&db->db_ProcSem);
   
-	// Temporary packet store
-	struct IOSana2Req** pendingSends = (struct IOSana2Req**)AllocVec(MAX_PACKETS_PER_CALL * sizeof(struct IOSana2Req*), MEMF_PUBLIC);	
+	// Temporary packet store	
 	UBYTE* packetData = (UBYTE*)AllocVec(ETH_MTU+16, MEMF_PUBLIC);	
 
-	struct MsgPort timerPort;
-	timerPort.mp_Node.ln_Pri = 0;                       
-	timerPort.mp_SigBit      = AllocSignal(-1);
-	timerPort.mp_SigTask     = (struct Task *)FindTask(0);
-	NewList(&timerPort.mp_MsgList);
+	struct MsgPort *timerPort = NULL;
+	struct timerequest *timerReq = NULL;
+	struct Library *TimerBase = NULL;
 
-	LONG errorDevOpen = 0;
-	struct timerequest* time_req = NULL;
-
-	if (((char)timerPort.mp_SigBit)>=0) {
-		time_req = (struct timerequest*) CreateIORequest(&timerPort, sizeof (struct timerequest));
-		if (time_req) errorDevOpen = OpenDevice("timer.device", UNIT_VBLANK, (struct IORequest *)time_req, 0);
-	}
-	struct Library *TimerBase = (APTR) time_req->tr_node.io_Device;
-
+	timerPort = CreateMsgPort();
+	if (timerPort) timerReq = (struct timerequest *)CreateIORequest(timerPort, sizeof(struct timerequest));
+	if (timerReq) 
+		if (OpenDevice(TIMERNAME, UNIT_MICROHZ, (struct IORequest *)timerReq, 0) == 0) TimerBase = (struct Library *)timerReq->tr_node.io_Device;
 	
 	logMessagef(db,"PacketServer: Starting Wifi Device"); 
 	struct PaulaNETSettings settings;
 	APTR device = paulaNetFindAndOpen((struct ExecBase *)db->db_SysBase, (struct DosLibrary *)db->db_DOSBase);	
 
-	if ((!device) || (((char)timerPort.mp_SigBit) < 0) || (!time_req)) {
+	if ((!device) || (!packetData) || (!timerPort) || (!timerReq) || (!TimerBase)) {
 		init->error = 1;
 		DoEvent(db, S2EVENT_OFFLINE);
 		db->db_online = 0;
@@ -689,24 +677,27 @@ __saveds void frame_proc() {
 			paulaNetClose(device);
 			device = NULL;
 		}
-		
-		if (errorDevOpen != 0) {
-			logMessage(db,"PacketServer: Out of memory [3]");
-		} else {			
-			CloseDevice((struct IORequest *)time_req);
-			if (!time_req) {
-				logMessage(db,"PacketServer: Out of memory [2]");
-			} else {
-				DeleteIORequest((struct IORequest *)time_req);
-			}
-		}
-		
+				
 		if (!packetData) {
 			logMessage(db,"PacketServer: Out of memory [1]");
-			D(("scsidayna_task: Out of memory [1]\n")); 
+			D(("PacketServer: Out of memory [1]\n")); 
 		} else FreeVec((void*)packetData);
+
+		if (!timerReq) {
+			logMessage(db,"PacketServer: Out of memory [2]");
+			D(("PacketServer: Out of memory [2]\n")); 
+		} else {
+			CloseDevice((struct IORequest *)timerReq);
+			DeleteIORequest((struct IORequest *)timerReq);
+		}
+
+		if (!timerPort) {
+			logMessage(db,"PacketServer: Out of memory [3]");
+			D(("PacketServer: Out of memory [3]\n")); 
+		} else {
+			DeleteMsgPort(timerPort);
+		}
 		
-		if (((char)timerPort.mp_SigBit)>=0) FreeSignal(timerPort.mp_SigBit);
 		ReplyMsg((struct Message*)init);
 		Forbid();
 		ReleaseSemaphore(&db->db_ProcSem);
@@ -719,17 +710,16 @@ __saveds void frame_proc() {
 	init->error = 0;
 	ReplyMsg((struct Message*)init);
 
-	unsigned long timerSignalMask = (1UL << timerPort.mp_SigBit);
-
-	time_req->tr_node.io_Command = TR_ADDREQUEST; time_req->tr_time.tv_secs = 0;
 
 	ULONG recv = 0;
 		
 	// Change task priority
 	//if (settings->taskPriority != 0) SetTaskPri((struct Task*)db->db_Proc,settings->taskPriority);      
-UWORD LLL = 0;
 	struct timeval timeLastWifiCheck = {0UL,0UL};
 	struct timeval timeWifiCheck = {0UL,0UL};
+
+	int lastFailTxCount = 0;
+
 	while (!(recv & SIGBREAKF_CTRL_C) && !db->db_quit) {
 		struct IOSana2Req *nextwrite;
 
@@ -766,146 +756,94 @@ UWORD LLL = 0;
 		UBYTE morePackets = 0;
 		if (db->db_online) {			
 			USHORT counter = 0; 
-			Delay(1);
+			
 			recv = SetSignal(0L, 0L);	
 			
-			int i = totalReceived;
-			morePackets = paulaNetReceivePackets(device, db, (PacketReceivedCallback)onPacketReceived);
-			if (morePackets == DEVICESTATUS_ERROR) D(("ERROROORORO"));				
-			if (i!=totalReceived) {
-				logMessagef(db,"%ld packets received   (%ld)", (LONG)totalReceived, (LONG)counter);
+			if (!(recv & SIGBREAKF_CTRL_C)) {
+				morePackets = paulaNetReceivePackets(device, db, (PacketReceivedCallback)onPacketReceived);
+				if (morePackets == DEVICESTATUS_ERROR) D(("ERROROORORO"));				
 			}
-			Delay(1);
+			
 			// Transmit
 			if (!(recv & SIGBREAKF_CTRL_C)) {
-				int packetCount = 0;
-				paulaNetBeginTransmitPackets(device);
 
-				struct IOSana2Req** pendingSendsSave = pendingSends;
-				struct IOSana2Req *nextwrite;
+				// This will only work if the previous lot of packets was received properly by the pico
+				if (paulaNetBeginTransmitPackets(device)) {
+					struct IOSana2Req *nextwrite;
 
-				// Collect packets until not enough data space or too many
-				ObtainSemaphore(&db->db_WriteListSem);
-				struct IOSana2Req *ior = (struct IOSana2Req *)db->db_WriteList.lh_Head;
-				while ((nextwrite = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) != NULL) {
-					USHORT sz = ior->ios2_DataLength;
-					UBYTE* dataOut = packetData;
+					// Collect packets until not enough data space or too many
+					ObtainSemaphore(&db->db_WriteListSem);
+					struct IOSana2Req *ior = (struct IOSana2Req *)db->db_WriteList.lh_Head;
+					while ((nextwrite = (struct IOSana2Req *)ior->ios2_Req.io_Message.mn_Node.ln_Succ) != NULL) {
+						USHORT sz = ior->ios2_DataLength;
+						UBYTE* dataOut = packetData;
 
-					// Add packet ethernet header if needed
-					if (!(ior->ios2_Req.io_Flags & SANA2IOF_RAW)) {
-						*((USHORT*)(dataOut+12)) = (USHORT)ior->ios2_PacketType;
-						// Add ethernet header
-						memcpy(dataOut, ior->ios2_DstAddr, HW_ADDRFIELDSIZE);
-						memcpy(dataOut+6, HW_MAC, HW_ADDRFIELDSIZE);
-						sz += HW_ETH_HDR_SIZE;
-						dataOut += HW_ETH_HDR_SIZE;
-					}
+						// Add packet ethernet header if needed
+						if (!(ior->ios2_Req.io_Flags & SANA2IOF_RAW)) {
+							*((USHORT*)(dataOut+12)) = (USHORT)ior->ios2_PacketType;
+							// Add ethernet header
+							memcpy(dataOut, ior->ios2_DstAddr, HW_ADDRFIELDSIZE);
+							memcpy(dataOut+6, HW_MAC, HW_ADDRFIELDSIZE);
+							sz += HW_ETH_HDR_SIZE;
+							dataOut += HW_ETH_HDR_SIZE;
+						}
 
-					// Add the data
-					struct BufferManagement *bm = (struct BufferManagement *)ior->ios2_BufferManagement;				   
-					if (!(*bm->bm_CopyFromBuffer)(dataOut, ior->ios2_Data, ior->ios2_DataLength)) {
-						ior->ios2_Req.io_Error = S2ERR_SOFTWARE;
-						ior->ios2_WireError = S2WERR_BUFF_ERROR;
-						DoEvent(db, S2EVENT_ERROR | S2EVENT_BUFF | S2EVENT_SOFTWARE);
-						D(("bm_CopyFromBuffer FAIL"));		
-						Remove((struct Node*)ior);
-						DevTermIO(db, (struct IORequest *)ior);
-					} else {						
-						if (pendingSendsSave) {
-							*pendingSendsSave = ior; 
-							pendingSendsSave++;
+						if (sz < ETH_MTU) {
+							// Add the data
+							struct BufferManagement *bm = (struct BufferManagement *)ior->ios2_BufferManagement;				   
+							if (!(*bm->bm_CopyFromBuffer)(dataOut, ior->ios2_Data, ior->ios2_DataLength)) {
+								ior->ios2_Req.io_Error = S2ERR_SOFTWARE;
+								ior->ios2_WireError = S2WERR_BUFF_ERROR;
+								DoEvent(db, S2EVENT_ERROR | S2EVENT_BUFF | S2EVENT_SOFTWARE);
+								D(("bm_CopyFromBuffer FAIL"));		
+								Remove((struct Node*)ior);
+								DevTermIO(db, (struct IORequest *)ior);
+							} else {						
+								ior->ios2_Req.io_Error = ior->ios2_WireError = 0;
+								db->db_DevStats.PacketsSent++;
+								db->db_DevStats.PacketsSent++;
+								Remove((struct Node*)ior);
+								DevTermIO(db, (struct IORequest *)ior);
+								if (!paulaNetAddPacket(device, packetData, sz)) break;
+							}
 						} else {
-							ior->ios2_Req.io_Error = ior->ios2_WireError = 0;
-							db->db_DevStats.PacketsSent++;
+							ior->ios2_Req.io_Error  = S2ERR_MTU_EXCEEDED;
+	  						ior->ios2_WireError = S2WERR_BUFF_ERROR;
+	  						DoEvent(db, S2EVENT_ERROR | S2EVENT_BUFF | S2EVENT_SOFTWARE);
+	  						Remove((struct Node*)ior);
 							DevTermIO(db, (struct IORequest *)ior);
-						}						
-						Remove((struct Node*)ior);
-						packetCount++;
-						// Break when out of space
-						USHORT packetType = ((USHORT)packetData[12]<<8)|((USHORT)packetData[13]);   					
-						if (!paulaNetAddPacket(device, packetData, sz)) break;
+						}
+						ior = nextwrite;
 					}
-					ior = nextwrite;
+					ReleaseSemaphore(&db->db_WriteListSem);
 				}
-				ReleaseSemaphore(&db->db_WriteListSem);
-				// Send any packets found - Must ALWAYS call this to clear the receive buffer on the pico
-				if (!paulaNetTransmitPackets(device, TRUE)) {
-					logMessagef(db, "   %ld Packets FAILED to send", (ULONG)packetCount);
-					D(("FAILED SENT"));
-					if (pendingSends) {							
-						for (struct IOSana2Req **req = pendingSends; req<pendingSendsSave; req++) {							
-							(*req)->ios2_Req.io_Error = S2ERR_TX_FAILURE; (*req)->ios2_WireError = S2WERR_GENERIC_ERROR;
-							DevTermIO(db, (struct IORequest *)(*req));
-							DoEvent(db, S2EVENT_ERROR | S2EVENT_TX | S2EVENT_HARDWARE);
-						}
-					}
-				} else {
-					if (pendingSends) {
-						for (struct IOSana2Req **req = pendingSends; req<pendingSendsSave; req++) {												
-							(*req)->ios2_Req.io_Error = (*req)->ios2_WireError = 0;
-							DevTermIO(db, (struct IORequest *)(*req));								
-						}
-					}
-					db->db_DevStats.PacketsSent+=packetCount;
+
+				// Send any packets found - Must ALWAYS call this to clear the receive buffer on the pico, this will re-send the previous set if it wasn't ACK'd
+				if (!paulaNetTransmitPackets(device)) {
+					// This doesnt matter that much if it fails as the code will just keep re-sending this forever!
+					logMessagef(db, "Failed to send packets. will retry");
 				}
 			}			
-			if (recv & SIGBREAKF_CTRL_C) {
-				D(("Terminate Requested"));
-			} else 
-			if (!(morePackets & DEVICESTATUS_CANRECEIVE)) {
-				time_req->tr_time.tv_micro = 1L;
-				SendIO((struct IORequest *)time_req);
-				db->db_timerUsed = TRUE;
-				recv = Wait(SIGBREAKF_CTRL_C | timerSignalMask | SIGBREAKF_CTRL_F);
-				if (!CheckIO((struct IORequest *)time_req)) { // IO is pending
-					AbortIO((struct IORequest *)time_req);
-				}
-				WaitIO((struct IORequest *)time_req);  // wait until IO fully done
-				SetSignal(0, timerSignalMask); // Very important reset of timer!
-				
-			
-			}			
+			if (recv & SIGBREAKF_CTRL_C) D(("Terminate Requested"));
 		} else {
-			recv = SetSignal(0L, 0L);
-			// Not enabled? Pause for a decent amount of time
-			time_req->tr_time.tv_micro = 250 * 1000L;
-			SendIO((struct IORequest *)time_req);
-			db->db_timerUsed = TRUE ;
-			recv = Wait(SIGBREAKF_CTRL_C | timerSignalMask | SIGBREAKF_CTRL_F);
-			if (!CheckIO((struct IORequest *)time_req)) { // IO is pending
-				AbortIO((struct IORequest *)time_req);
-			}
-			WaitIO((struct IORequest *)time_req);  // wait until IO fully done
-			SetSignal(0, timerSignalMask); // Very important reset of timer!
+			Delay(5);
 		}
 	}
 	
 	logMessage(db,"PacketServer: Shutting down [1]");
-	
-	// Make sure it's finished - this prevents an intermittent crash at shutdown!
-	if (db->db_timerUsed){
-		if (!CheckIO((struct IORequest *)time_req)) { // IO is pending
-			AbortIO((struct IORequest *)time_req);
-		}
-		WaitIO((struct IORequest *)time_req);  // wait until IO fully done
-		SetSignal(0, timerSignalMask); // Very important reset of timer!
-	}	
-	logMessage(db,"PacketServer: Shutting down [2]");
-	
+		
 	DoEvent(db, S2EVENT_OFFLINE);
 	db->db_online = 0;
 	paulaNetClose(device);
 	rejectAllPackets(db);
 	
 	FreeVec((void*)packetData);
-	if (pendingSends) FreeVec(pendingSends);
-		
-	logMessage(db,"PacketServer: Shutting down [3]");
-	
-	CloseDevice((struct IORequest *)time_req);
-	DeleteIORequest((struct IORequest *)time_req);
-	FreeSignal(timerPort.mp_SigBit);
-	
+
+	logMessage(db,"PacketServer: Shutting down [2]");
+	CloseDevice((struct IORequest *)timerReq);
+	DeleteIORequest((struct IORequest *)timerReq);
+	DeleteMsgPort(timerPort);
+				
 	logMessage(db,"PacketServer: Closed");
 	
 	Forbid();
