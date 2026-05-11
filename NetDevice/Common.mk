@@ -1,4 +1,4 @@
-debug = 1
+debug = 0
 compiler_vcc = 1
 
 ###############################################################################
@@ -68,6 +68,8 @@ DEFINES2 += -DNEWSTYLE
 
 endif
 
+DEFINES += -DDRIVERMODE=1
+DEFINES2 += -DDRIVERMODE=1
 
 ifeq ($(debug),1)
 CFLAGS  += -DDEBUG -g
@@ -78,6 +80,7 @@ endif
 CFLAGS  += -I. -I$(SUBDIR)
 CFLAGS2 += -I. -I$(SUBDIR)
 LDFLAGS =
+
 
 LINKLIBS += -lvcs
 

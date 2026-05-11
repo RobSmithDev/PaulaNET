@@ -38,7 +38,7 @@ typedef UBYTE DataMode;
 #define PAULA_WRITE_PADDING      (4+2)    // (write padding in bytes, 4 for the two sync)
 #define CHIPBUFFER_SIZE          (MAX_TRANSFER_SIZE + (PAULA_INDEX_PADDING<<2))
 
-#define SETTINGS_MAGIC_ID        0x504E4554
+#define DATA_MAGIC_ID            0x5450
 #define SYNCWORD                 0x44894489
 #define TRACK_ACCESSPOINT        75
 #define TRACK_CONFIG             76
@@ -53,12 +53,14 @@ typedef UBYTE DataMode;
 
 // I/O Data Header
 struct DataHeader {    
-    ULONG       magic;          // Should read Pnet
+    UWORD       magic;          // Should read Pt
     UWORD       checksum;       // Simple checksum
     UWORD       dataSize;       // Full data size
     UWORD       compressedSize; // Compressed (transmitted) size
     DataMode    dataMode;       // What this data is
     UBYTE       compressed;     // Is it compressed
+    UBYTE       amigaCounter;   // For TX/RX Packet Management
+    UBYTE       picoCounter;
 };
 
 
@@ -81,6 +83,7 @@ struct PaulaNET {
     UBYTE                       lastAmigaCounter;
     UBYTE                       lastPicoCounter;
     UBYTE                       packetCounter;
+    BOOL                        ackLastPacketData;
 };
 
 #define SysBase dev->pnSysBase
@@ -90,16 +93,12 @@ struct PaulaNET {
 struct PacketsHeader {
     UBYTE numPackets;    
     UBYTE flags; 
-    UBYTE amigaCounter;
-    UBYTE picoCounter;
 };
 
 struct CompressionHeader {
     UWORD compressedSize;     
     UWORD originalSize;    
 };
-
-
 
 
 #ifdef DEBUGGING
@@ -127,14 +126,14 @@ void hexDump(BPTR out, const void* data, ULONG length) {
 // Formatted logging to console window
 static const UWORD stuffChar[] = {0x16c0, 0x4e75};
 static void logMessagef(struct PaulaNET* dev, const char *messageFormat, ...) {
-
+#ifdef DEBUGGING
 	char buf[100];
     va_list args;
     va_start(args, messageFormat);	 
     RawDoFmt((STRPTR)messageFormat, (APTR)args, (void (*)(void))stuffChar, buf);
 	va_end(args);
 	D((buf));
-
+#endif
 }
 
 
@@ -147,7 +146,6 @@ static UWORD calcChecksum(UWORD* data, int bytes) {
     }
     return checksum;
 }
-
 
 // Reverse pass through the buffer to calculate run lengths at each position.
 // On exit, runs[i] contains the number of consecutive identical bytes starting at position i, capped at MAX_RUN.
@@ -319,6 +317,7 @@ static void shiftBuffer(struct PaulaNET* dev, void* data, int length, int bitOff
 // Takes the input data and shifts it so it's aligned, then returns the start of the COMPRESSED data
 // The header is copied into the DataHeader supplied 
 // If not found, or the checksum fails, returns NULL. Output buffer is from "compression space"
+// If skipChecksum is set then checkum is not checked, and data length isnt validated. Data is also not decompressed
 static APTR alignData(struct PaulaNET* device, void* data, int dataLength, struct DataHeader* header, BOOL headerOnly) {
     int offset = findDataOffset(data, dataLength);
     if (offset < 0) {
@@ -337,36 +336,38 @@ static APTR alignData(struct PaulaNET* device, void* data, int dataLength, struc
         dataStart = ((UBYTE*)data) + (offset>>3);
         mfmDecode((WORD*)dataStart, sizeof(struct DataHeader)*2, (UBYTE*)header, sizeof(struct DataHeader));        
         // Validate header
-        if (header->magic != SETTINGS_MAGIC_ID) return NULL;
-        if (headerOnly) return data;
+        if (header->magic != DATA_MAGIC_ID) return NULL;
+        if (headerOnly) return (APTR)header;
         receivedDataLength = header->compressed ? header->compressedSize : header->dataSize;
-        if (receivedDataLength > dataLength - ((offset/32) + (sizeof(struct DataHeader)*2))) return NULL; 
+        if (receivedDataLength > dataLength - ((offset/32) + (sizeof(struct DataHeader)*2))) {
+            D(("Insufficient Data Received [1]"));
+            return NULL; 
+        }
         dataStart += sizeof(struct DataHeader) * 2; 
-
-#ifdef DEBUGGING        
-        FPrintf(Output(), "Aligned\n");
-#endif        
     } else {
         // Data needs aligning first
         shiftBuffer(device, data, sizeof(struct DataHeader)*2, offset);
         mfmDecode((WORD*)data, sizeof(struct DataHeader)*2, (UBYTE*)header, sizeof(struct DataHeader));
         offset += sizeof(struct DataHeader) * 16;        // 8 bits + mfm encoding so double  
         // Validate header
-        if (header->magic != SETTINGS_MAGIC_ID) return NULL;
-        if (headerOnly) return data;
+        if (header->magic != DATA_MAGIC_ID) return NULL;
+        if (headerOnly) return (APTR)header;
         receivedDataLength = header->compressed ? header->compressedSize : header->dataSize;
         // The below can't happen, so check early
-        if (receivedDataLength> dataLength - ((offset/32) + (sizeof(struct DataHeader)*2))) return NULL; 
-        shiftBuffer(device, data, receivedDataLength, offset);
+        if (receivedDataLength> dataLength - ((offset/32) + (sizeof(struct DataHeader)*2))) {
+            D(("Insufficient Data Received [1]"));
+            return NULL; 
+        }
+        shiftBuffer(device, data, receivedDataLength, offset);        
         dataStart = (UBYTE*)data;
-#ifdef DEBUGGING        
-        FPrintf(Output(), "Misaligned\n");
-#endif        
     }
-    
+
     // Once here, the header is valid, we know what type of data this is, and how big it should be.
     // The next step is validating the data    
-    if (calcChecksum((UWORD*)dataStart, header->compressed ? header->compressedSize : header->dataSize) != header->checksum) return NULL;
+    if (calcChecksum((UWORD*)dataStart, header->compressed ? header->compressedSize : header->dataSize) != header->checksum) {
+        D(("Checksum Failed"));
+        return NULL;
+    }
     
 #ifdef DEBUGGING
     FPrintf(Output(), "Data Size: %ld\n", (LONG)header->dataSize);
@@ -386,7 +387,9 @@ static APTR alignData(struct PaulaNET* device, void* data, int dataLength, struc
         case 2: if (mfmDecode((UWORD*)dataStart, header->compressedSize, (UBYTE*)device->compressionSpace, CHIPBUFFER_SIZE) != header->dataSize) return NULL; 
                 return device->compressionSpace;
 
-        default: return NULL;
+        default: 
+            D(("Invalid Compression Mode"));
+            return NULL;
     }    
 }
 
@@ -396,10 +399,16 @@ BOOL transmitToPaulaNET(struct PaulaNET* dev, int track, DataMode mode, int data
     dev->buffer[0] = 0x0001;
     dev->buffer[1] = 0x0001;
     struct DataHeader* header = (struct DataHeader*)&dev->buffer[2];
-    header->magic = SETTINGS_MAGIC_ID;
+    header->magic = DATA_MAGIC_ID;
     header->dataSize = dataSize;
     header->dataMode = mode;
     header->compressed = (dev->settings.flags & FLAGS_AMIGA_COMPRESSION) ? 1 : 0;    
+#ifdef DRIVERMODE    
+    header->compressed |= FLAGS_FROM_DRIVER;
+#endif    
+    header->amigaCounter = dev->lastAmigaCounter;
+    header->picoCounter = dev->lastPicoCounter;
+
     if (header->compressed) {
         header->compressedSize = rleCompress(dev, (UBYTE*)data, dataSize, (UBYTE*)&header[1], (UBYTE*)dev->compressionSpace);
         header->checksum = calcChecksum((UWORD*)&header[1], header->compressedSize);
@@ -567,6 +576,7 @@ APTR paulaNetOpen(struct ExecBase *Sysbase, struct DosLibrary *Dosbase, int devi
     tmp->packetBackup[0] = 0x0001;
     tmp->packetBackup[1] = 0x0001;
     tmp->packetCounter = 0;
+    tmp->ackLastPacketData = FALSE;
 
     DoIO((struct IORequest*)tmp->device);
     if (tmp->device->iotd_Req.io_Actual) {
@@ -671,7 +681,7 @@ BOOL paulaNetIsAccessPointScanActive(APTR device) {
 }
 
 // Receive data from PaulaNET with retry
-APTR receiveFromPaulaNetOpt(struct PaulaNET* dev, int track, int dataLen, DataMode mode, struct DataHeader* header, BOOL headerOnly) {
+APTR receiveFromPaulaNet(struct PaulaNET* dev, int track, int dataLen, DataMode mode, struct DataHeader* header, BOOL headerOnly) {
     APTR data = NULL;
 
     // Allow retries - this is only usually needed if somehow the track number gets out of sync
@@ -711,14 +721,14 @@ APTR receiveFromPaulaNetOpt(struct PaulaNET* dev, int track, int dataLen, DataMo
             D(("Wrong Mode"));
             continue;
         }
+#ifdef DRIVERMODE
+        // If this matches then the Pico has received our last batch of packets
+        if (header->amigaCounter == dev->lastAmigaCounter) dev->writePosition = NULL;
+#endif        
         return data;
     }
     D(("No Data"));
     return NULL;
-}
-
-APTR receiveFromPaulaNet(struct PaulaNET* dev, int track, int dataLen, DataMode mode, struct DataHeader* header) {
-    return receiveFromPaulaNetOpt(dev, track, dataLen, mode, header, FALSE);
 }
 
 // Populates the results from the scan. Returns the number found.
@@ -734,7 +744,7 @@ BOOL paulaNetGetAccessPoints(APTR device, struct ScanResults* results) {
     }
 
     struct DataHeader header;
-    APTR data = receiveFromPaulaNet(dev, TRACK_ACCESSPOINT, sizeof(struct ScanResults), dmAccessPoints, &header);
+    APTR data = receiveFromPaulaNet(dev, TRACK_ACCESSPOINT, sizeof(struct ScanResults), dmAccessPoints, &header, FALSE);
     if (!data) return FALSE;
 
     results->count = *((UWORD*)data);
@@ -752,7 +762,7 @@ static BOOL paulaNetInternalGetConfig(APTR device) {
     if (!dev) return FALSE;
 
      struct DataHeader header;
-    APTR data = receiveFromPaulaNet(dev, TRACK_CONFIG, sizeof(struct PaulaNETSettings)  + sizeof(struct LiveStatus), dmConfig, &header);
+    APTR data = receiveFromPaulaNet(dev, TRACK_CONFIG, sizeof(struct PaulaNETSettings)  + sizeof(struct LiveStatus), dmConfig, &header, FALSE);
     if (!data) return FALSE;  
     struct PaulaNETSettings* recv = (struct PaulaNETSettings*)data;
     {
@@ -817,7 +827,7 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
     struct DataHeader header;
 
     // Try to query how much we need to read
-    APTR data = receiveFromPaulaNetOpt(dev, TRACK_ETHERNET, 0, dmEthernet, &header, TRUE); 
+    APTR data = receiveFromPaulaNet(dev, TRACK_ETHERNET, 0, dmEthernet, &header, TRUE); 
     if (!data) return FALSE;
 
     // ABORT and RESET
@@ -827,21 +837,22 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
     dev->device->iotd_Req.io_Offset  = TRACK_SEEK_OFFSET(TRACK_ETHERNET,TRACK_WRITE);
     DoIO((struct IORequest *)dev->device);
 
+    // No data waiting
+    if (header.compressedSize == 0) {
+        dev->ackLastPacketData = FALSE;
+        return TRUE;
+    }
+
     // Now collect the required number of bytes - *should* be quicker
-    int size = header.compressedSize;
-
-    data = receiveFromPaulaNet(dev, TRACK_ETHERNET, size, dmEthernet, &header );    
-
+    data = receiveFromPaulaNet(dev, TRACK_ETHERNET, header.compressedSize, dmEthernet, &header, FALSE);    
 
     if (!data) {
-        D(("DEVICESTATUS_ERROR"));
+        D(("No Packet Data"));
         return FALSE;    
     }
 
-    if (header.dataSize < 4) {
-        D(("header.dataSize < 4"));
-        return FALSE;
-    }
+    dev->ackLastPacketData = TRUE;
+
 #ifdef DEBUGGING
     FPrintf(Output(), "Compressed Size: %ld\n", (LONG)header.compressedSize);
     FPrintf(Output(), "Data Size: %ld\n", (LONG)header.dataSize);
@@ -856,14 +867,14 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
     pkt += sizeof(struct PacketsHeader);
     UWORD* pktEnd = (UWORD*)(((UBYTE*)pkt) + ((header.dataSize - 4)<<1));
 
-    // If this matches then the Pico has received our last batch of packets
-    if (pkHeader.amigaCounter == dev->lastAmigaCounter) dev->writePosition = NULL;
-
     // Skip if we've already seen this data
-    if (dev->lastPicoCounter == pkHeader.picoCounter) return TRUE;
+    if (dev->lastPicoCounter == header.picoCounter) {
+        D(("Already seen."));
+        return TRUE;
+    }
 
     // Keep a copy of the last packet counter so we can tell the Pico we received it
-    dev->lastPicoCounter = pkHeader.picoCounter;
+    dev->lastPicoCounter = header.picoCounter;
     
     struct CompressionHeader cHeader;    
     for (int i=0; i<pkHeader.numPackets; i++) {
@@ -973,32 +984,43 @@ BOOL paulaNetTransmitPackets(APTR device) {
     if (!dev->writePosition) return TRUE;  // nothing to send
     UWORD lastBit = 0;
 
+    // Smart if no data is needed ot be transmitted and the pico already know's we're in sync, dont waste time in a send
+    if ((!dev->ackLastPacketData) && (!dev->packetCounter)) {
+        D(("SKIPPING Transmit, nothing to send"));
+        dev->writePosition = NULL;
+        return TRUE;
+    }
+
     // Prepare
     struct DataHeader* header = (struct DataHeader*)&dev->packetBackup[2];
 
     // Write the packet header, this is actually after the main header
     struct PacketsHeader hdr;
-    hdr.amigaCounter = dev->lastAmigaCounter; 
-    hdr.picoCounter = dev->lastPicoCounter; 
     hdr.numPackets = dev->packetCounter;
 
     hdr.flags = 0; // rfu
     mfmEncode((UBYTE*)&hdr, sizeof(hdr), (UWORD*)&header[1], &lastBit);
 
      // Step 1: Prepare header
-    header->magic = SETTINGS_MAGIC_ID;
+    header->magic = DATA_MAGIC_ID;
     header->dataSize = ((UBYTE*)dev->writePosition) - ((UBYTE*)&header[1]);
     header->compressedSize = header->dataSize;
     header->dataMode = dmEthernet;
     header->compressed = 2;
+#ifdef DRIVERMODE    
+    header->compressed |= FLAGS_FROM_DRIVER;
+#endif     
     header->checksum = calcChecksum((UWORD*)&header[1], header->compressedSize);
+    header->amigaCounter = dev->lastAmigaCounter;
+    header->picoCounter = dev->lastPicoCounter;
     UBYTE* dataEnd = ((UBYTE*)&header[1]) + header->compressedSize;
+    if ((dataEnd - ((UBYTE*)dev->packetBackup)) & 1)  *dataEnd++ = 0xAA;        
 
     // Trail
-    for (int i=0; i<8; i++) *dataEnd++ = 0xAA;
+    *dataEnd++ = 0xAA;
+    *dataEnd++ = 0xAA;
 
     // Word align
-    if ((dataEnd - ((UBYTE*)dev->packetBackup)) & 1)  *dataEnd++ = 0xAA;        
 
     // Step 2: Transmit
     dev->device->iotd_Req.io_Command = ETD_RAWWRITE;

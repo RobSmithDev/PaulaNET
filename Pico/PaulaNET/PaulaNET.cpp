@@ -30,7 +30,7 @@ _____             _       _   _ ___________
 #include "trackBuilder.h"
 #include "pico/flash.h"
 
-#define DEBUGGING 1
+//#define DEBUGGING 1
 
 
 /*
@@ -87,6 +87,7 @@ Head Selection:
 #define MAX_WIFI_SCANS              5           // Perform wifi scan this many times to try to catch all the networks
 
 #define SETTINGS_MAGIC_ID           0x504E4554
+#define DATA_MAGIC_ID               0x5450
 #define MAX_SCAN_RESULTS            64
 
 // Place settings at the last sector of flash
@@ -98,9 +99,11 @@ enum PaulaMode {pmDisk, pmAccessPoint, pmConfig, pmEthernet};
 #define DEVICESTATUS_CANRECEIVE             1
 #define DEVICESTATUS_CANSEND                2
 
+
 #define SWAP16(x) __builtin_bswap16(x)
 #define SWAP32(x) ((((x) & 0xFF) << 24) | (((x) & 0xFF00) << 8) | (((x) >> 8) & 0xFF00) | (((x) >> 24) & 0xFF))
 
+#define FLAGS_FROM_DRIVER               (1<<6)          // Data came from the driver, not the config program
 #define FLAGS_AMIGA_COMPRESSION         (1<<1)          // Amiga compresses data when sending to the Pico
 #define FLAGS_PICO_COMPRESSION          (1<<0)          // Pico compresses data when sending to the Amiga
 
@@ -131,12 +134,14 @@ struct LiveStatus {
 
 // Header on the front of all data sent or received
 struct DataHeader {
-    uint32_t    magic;          // Should read Pnet
+    uint16_t    magic;          // Should read Pnet
     uint16_t    checksum;       // Simple checksum
     uint16_t    dataSize;       // Full data size
     uint16_t    compressedSize; // Compressed data size
     DataMode    dataMode;       // What this data is
     uint8_t     compressed;     // Was compression used?
+    uint8_t     amigaCounter; 
+    uint8_t     picoCounter;
 };
 
 struct PaulaNETSettings settings;
@@ -152,7 +157,7 @@ struct ScanResult {
 };
 ScanResult scanResults[MAX_SCAN_RESULTS]; 
 
-#define PACKET_QUEUE_SIZE   20
+#define PACKET_QUEUE_SIZE   30
 #define ETH_MTU             1518  // 1500 + ethernet header + some margin
 
 // A single packet, as it's sent or received
@@ -172,8 +177,6 @@ struct PacketQueue {
 struct PacketsHeader {
     uint8_t numPackets;     
     uint8_t flags; 
-    uint8_t amigaCounter; 
-    uint8_t picoCounter;
 };
 
 struct CompressionHeader {
@@ -241,6 +244,7 @@ volatile uint32_t lastStepTime;
 volatile int wifiScanCounter = 0;       // How many scans have been completed before we say its actually complete
 volatile bool isWifiConnecting = false; // Is wifi connecting?
 volatile PaulaMode paulaMode;
+
 uint8_t lastAmigaCounter = 0xFF;
 uint8_t lastPicoCounter = 0x7F;
 
@@ -333,8 +337,8 @@ void loadSettings() {
     if (flashSettings->magic != SETTINGS_MAGIC_ID) {
         // defaults
         memset(&settings, 0, sizeof(settings));
-        settings.maxRxSize = 8192;
-        settings.maxTxSize = 8192;
+        settings.maxRxSize = 16384-256;
+        settings.maxTxSize = 16384-256;
         settings.flags = FLAGS_AMIGA_COMPRESSION | FLAGS_PICO_COMPRESSION;
         strcpy(settings.hostname, "PaulaNET");
     } else {
@@ -573,17 +577,20 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
 
     header->dataSize = SWAP16(header->dataSize);
     header->compressedSize = SWAP16(header->compressedSize);
-    header->magic = SWAP32(header->magic);
+    header->magic = SWAP16(header->magic);
+
+        // Is the Amiga ACK our current packets buffer? - only done here as we dont know if the other messwges come from the driver or the config tool
+    if ((header->compressed & FLAGS_FROM_DRIVER) && (header->picoCounter == lastPicoCounter)) PacketBackupSize = 0;
 
 //   safePrintf("Compress Size: %i\n", header->compressedSize);
 //   safePrintf("Data Size: %i\n", header->dataSize);
 //   safePrintf("Checksum: %04lx\n", header->checksum);
 //   safePrintf("Data Mode: %i\n", header->dataMode);
 //   safePrintf("Compressed: %i\n", header->compressed);
-//   safePrintf("magic %x     %x\n", header->magic, SETTINGS_MAGIC_ID);
+//   safePrintf("magic %x     %x\n", header->magic, DATA_MAGIC_ID);
 
-    if (header->magic !=SETTINGS_MAGIC_ID) {
-        safePrintf("Receive header mismatch\n");
+    if (header->magic != DATA_MAGIC_ID) {
+        safePrintf("Receive header mismatch  %x vs %x\n", header->magic, DATA_MAGIC_ID);
         return false;
     }
 
@@ -642,8 +649,8 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
                     // Clamp a few things
                     if (inSettings->maxRxSize<MIN_TRANSFER_SIZE) inSettings->maxRxSize=MIN_TRANSFER_SIZE;
                     if (inSettings->maxTxSize<MIN_TRANSFER_SIZE) inSettings->maxTxSize=MIN_TRANSFER_SIZE;
-                    if (inSettings->maxRxSize>MAX_TRANSFER_SIZE) inSettings->maxRxSize=MAX_TRANSFER_SIZE;
-                    if (inSettings->maxTxSize>MAX_TRANSFER_SIZE) inSettings->maxTxSize=MAX_TRANSFER_SIZE;
+                    if (inSettings->maxRxSize>MAX_TRANSFER_SIZE-256) inSettings->maxRxSize=MAX_TRANSFER_SIZE-256;
+                    if (inSettings->maxTxSize>MAX_TRANSFER_SIZE-256) inSettings->maxTxSize=MAX_TRANSFER_SIZE-256;
 
                     // Password coming back will be all "*" if it wasnt changed
                     bool newPassword = strlen(inSettings->pwd) != strlen(settings.pwd);
@@ -668,7 +675,7 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
                     safePrintf("Config save error\n");
                     return false;
                 }
-            }
+            } 
             break;
         case PaulaMode::pmEthernet: 
             if (header->dataMode  != DataMode::dmEthernet) {
@@ -676,16 +683,14 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
                 return false;
             }
             {
-                // Decode the header
-                PacketsHeader hdr;
-                mfmDecode((uint16_t*)dataStart, sizeof(hdr)*2, (uint8_t*)&hdr);
-                dataStart += sizeof(hdr)*2;
-
-                // Is the Amiga ACK our current packets buffer? Yes it might be
-                if (hdr.picoCounter == lastPicoCounter) PacketBackupSize = 0;
                 // Have we seen this one before?
-                if (hdr.amigaCounter != lastAmigaCounter) {
-                    lastAmigaCounter = hdr.amigaCounter;
+                if (header->amigaCounter != lastAmigaCounter) {
+                    lastAmigaCounter = header->amigaCounter;
+                    // Decode the header
+                    PacketsHeader hdr;
+                    mfmDecode((uint16_t*)dataStart, sizeof(hdr)*2, (uint8_t*)&hdr);
+                    dataStart += sizeof(hdr)*2;
+
                     // How many packets?
                     int len = bytesReceived - (sizeof(DataHeader) + (sizeof(PacketsHeader)<<1));
                     if (len > header->dataSize) len = header->dataSize;
@@ -734,7 +739,7 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
 
                             __dmb();
                             txQueue.writeIndex = (txQueue.writeIndex + 1) % PACKET_QUEUE_SIZE;
-                        } else {
+                        } else {                            
                             safePrintf("Packet queue full, dropping packet");
                             return false;
                         }
@@ -759,6 +764,12 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
 // Prepares PacketBackup buffer for packets to transmit. When finished this buffer is RAW mfm ready to be streamed.
 void preparePacketsToTransmit() {
     if (PacketBackupSize) return; // already set? it's already ready
+
+    // only increase if somethign actually changed! this allows the Amiag to stop sending messages if it doesnt need to
+    if (compressedRxQueue.readIndex == compressedRxQueue.writeIndex) {
+        PacketBackupSize = 0;
+        return;
+    }
     lastPicoCounter++;
 
     // Pointer to whre data starts
@@ -769,7 +780,6 @@ void preparePacketsToTransmit() {
 
     // Populate the start of the packet header
     packetHeaderSend.numPackets = 0;
-    packetHeaderSend.picoCounter = lastPicoCounter;
 
     // NOTE: cycleCounterRX will need filling at the time of send incase it changes
     int bufferUsed = sizeof(packetHeaderSend)<<1;
@@ -792,27 +802,27 @@ void preparePacketsToTransmit() {
 uint32_t populateTransmitBufferForPackets() {   
     uint8_t* headerStart = (uint8_t*)&PacketBackup[ PAULA_INDEX_PADDING + 4];
     uint8_t* dataStart = headerStart +  (sizeof(DataHeader)*2);    
+    uint16_t lastBit = 0;
 
     preparePacketsToTransmit();
-    packetHeaderSend.flags = ((txQueue.writeIndex == txQueue.readIndex) ? 0 : DEVICESTATUS_CANSEND) | ((compressedRxQueue.writeIndex == compressedRxQueue.readIndex) ? 0 : DEVICESTATUS_CANRECEIVE);
-    packetHeaderSend.amigaCounter = lastAmigaCounter;  // send what the amiga last sent us
-
-    uint16_t lastBit = 0;
-    mfmEncode((uint8_t*)&packetHeaderSend, sizeof(packetHeaderSend), (uint16_t*)dataStart, &lastBit);
-
+    if (PacketBackupSize) {
+        packetHeaderSend.flags = ((txQueue.writeIndex == txQueue.readIndex) ? 0 : DEVICESTATUS_CANSEND) | ((compressedRxQueue.writeIndex == compressedRxQueue.readIndex) ? 0 : DEVICESTATUS_CANRECEIVE);
+        mfmEncode((uint8_t*)&packetHeaderSend, sizeof(packetHeaderSend), (uint16_t*)dataStart, &lastBit);
+    }
     DataHeader header;
     header.dataMode = DataMode::dmEthernet;  
-    header.magic = SWAP32(SETTINGS_MAGIC_ID);
+    header.magic = SWAP16(DATA_MAGIC_ID);
     header.dataSize = PacketBackupSize;        
     header.compressed = 0;          // Raw
     int compressSize = header.dataSize;
     header.compressedSize = SWAP16(header.dataSize);   
     header.checksum = SWAP16(calculateChecksum((uint16_t*)dataStart, header.dataSize));    
-    header.dataSize = SWAP16(header.dataSize);
+    header.dataSize = SWAP16(header.dataSize);    
+    header.amigaCounter = lastAmigaCounter;  
+    header.picoCounter = lastPicoCounter;
 
     lastBit = 0;
     mfmEncode((const uint8_t*)&header, sizeof(header), (uint16_t*)headerStart, &lastBit);
-
     dataStart += compressSize;     
     
     int dataLength = (dataStart - PacketBackup) + PAULA_INDEX_PADDING;
@@ -820,7 +830,6 @@ uint32_t populateTransmitBufferForPackets() {
     dataLength -= (dataStart - PacketBackup);
     if (dataLength) memset(dataStart, 0xAA, dataLength);
     dataStart += dataLength;
-       
     return dataStart - PacketBackup;
 }
 
@@ -836,8 +845,10 @@ uint32_t populateTransmitBuffer(const PaulaMode mode) {
     // The header is always sent out MFM encoded. The rest of the data isn't
     DataHeader header;
     header.checksum = 0;
-    header.magic = SWAP32(SETTINGS_MAGIC_ID);
+    header.magic = SWAP16(DATA_MAGIC_ID);
     header.dataSize = 0; // to be filled    
+    header.amigaCounter = lastAmigaCounter;  
+    header.picoCounter = lastPicoCounter;
     
     uint8_t* dataPos = CompressBuffer;
 
@@ -1068,11 +1079,11 @@ void core1Main() {
                         const PaulaMode mode = paulaMode; // capture the mode at the start
 
                         uint32_t bytesReceived = readFromPaula();
+                        gpio_put(PIN_LED_PAULAIO, 0);
                         if (bytesReceived) handleDataReceived(mode, bytesReceived);
 
                         // Wait until all data has finished being received
                         while (!gpio_get(PIN_WRITEGATE));
-                        gpio_put(PIN_LED_PAULAIO, 0);
                     }            
                 } else {
                     if (isMotorActive) {
@@ -1087,7 +1098,7 @@ void core1Main() {
                         } else {
                             bufferUsed = populateTransmitBuffer(paulaMode) / 2;   // length is number of 16-bit words used
                         }
-                        sleep_ms(1);
+                        sleep_ms(1);  // This is VERY important, or the Amiga doesnt have time to start monitoring for INDEX to happen
                         gpio_put(PIN_LED_PAULAIO, 1);         
                                                 
                         // Now we keep re-transmitting the same buffer over and over until MOTOR goes off or something else changes.
@@ -1095,7 +1106,7 @@ void core1Main() {
                             // Start transmission
                             gpio_put(PIN_INDEX, 0);   // index is used to help sync the data stream
                             dma_channel_configure(dma_chan, &cfg, &pioFloppyTX.pio->txf[pioFloppyTX.sm],  (paulaMode == PaulaMode::pmEthernet) ? PacketBackup : IoBuffer,bufferUsed,true);
-                            sleep_us(1000);   // wait 3ms, this allows the index to work properly.
+                            sleep_us(1000);   // wait 1ms, this allows the index to work properly.
                             gpio_put(PIN_INDEX, 1);
 
                             // Wait for one of these states to change
@@ -1184,6 +1195,8 @@ static err_t rawEthernetReceive(struct pbuf *p, struct netif *netif) {
         rxQueue.packets[rxQueue.writeIndex].length = len;
         __dmb();
         rxQueue.writeIndex = (rxQueue.writeIndex + 1) % PACKET_QUEUE_SIZE;
+    } else {
+        safePrintf("rawEthernetReceive Packet Dropped\n");
     }
 
     //return original_input(p, netif);
@@ -1235,7 +1248,6 @@ void handleWIFI() {
     }    
     __dmb();    
 
-#ifdef DEBUGGING        
     // Bootloader access
     char c = getchar_timeout_us(0);
     if (c == 'B') {
@@ -1243,7 +1255,6 @@ void handleWIFI() {
         sleep_ms(100);
         reset_usb_boot(0, 0);
     }
-#endif
 }
 
 
@@ -1259,25 +1270,7 @@ int main() {
     isSelected = false;
     isMotorActive = false;
     loadSettings();
-/*
-    for (;;) {
-         // Bootloader access
-        char c = getchar_timeout_us(0);
-        if (c == 'B') {
-            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-            sleep_ms(100);
-            reset_usb_boot(0, 0);
-        }
-        gpio_set_dir(PIN_DISKCHANGE, GPIO_OUT);
-        gpio_put(PIN_LED_PAULAIO, 1);    gpio_put(PIN_LED_WIFI, 1);    gpio_put(PIN_LED_WIFIIO, 1); gpio_put(PIN_DISKCHANGE, 1);
-        sleep_ms(5000);
-        gpio_put(PIN_LED_PAULAIO, 0);    gpio_put(PIN_LED_WIFI, 0);    gpio_put(PIN_LED_WIFIIO, 0); gpio_put(PIN_DISKCHANGE, 0);
-        sleep_ms(5000);
-        safePrintf("Test\n");
-    }
-            
-*/
-   
+
     // Initialise the Wi-Fi chip, if that fails theres no real point in running
     if (cyw43_arch_init()) {
         safePrintf("Wi-Fi init failed\n");
@@ -1376,8 +1369,9 @@ int main() {
             wifiReconnect = multicore_fifo_pop_blocking();
             safePrintf("Save settings requested %i\n",(int)wifiReconnect);
             saveSettings();
-            multicore_fifo_push_blocking(0);
-            safePrintf("Settings saved\n");
+            // Reboot the Pico
+            watchdog_reboot(0, 0, 0);
+            for (;;);
         }
 
         // Reconnect (sent from core1)

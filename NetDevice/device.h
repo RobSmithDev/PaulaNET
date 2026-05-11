@@ -1,16 +1,17 @@
 /*
- * SCSI DaynaPORT Device (scsidayna.device) Copyright (C) 2024-2026 RobSmithDev 
- *
- *
- * Originally based on the MNT ZZ9000 Network Driver Copyright (C) 2016-2023, Lukas F. Hartmann <lukas@mntre.com>
- *          which was Based on code copyright (C) 2018 Henryk Richter <henryk.richter@gmx.net>
- * Released under GPLv3+ with permission.
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
- * GNU General Public License v3.0 or later
- *
- * https://spdx.org/licenses/GPL-3.0-or-later.html
- */
+
+_____             _       _   _ ___________ 
+|  __ \          | |     | \ | |  ___|_   _|
+| |__) |___ _   _| | __ _|  \| | |__   | |  
+|  ___/ _` | | | | |/ _` | . ` |  __|  | |  
+| |  | (_| | |_| | | (_| | |\  | |___  | |  
+|_|   \__,_|\__,_|_|\__,_|_| \_|_____| |_|  
+
+  PaulaNET - Amiga WiFi via the Floppy Port
+  Using Paula's DMA for what she never intended
+  Copyright (C) 2026 RobSmithDev
+
+*/
 
 #ifndef _INC_DEVICE_H
 #define _INC_DEVICE_H

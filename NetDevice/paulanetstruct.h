@@ -35,7 +35,7 @@ struct ScanResults {
     UWORD count;
 };
 
-#define MAX_TRANSFER_SIZE           8192
+#define MAX_TRANSFER_SIZE           16384
 #define MIN_TRANSFER_SIZE           1536
 #define ETH_MTU                     1518    // 1500 + ethernet header + some margin
 #define MAX_PACKETS_PER_CALL        20      // Max packets to send or receive in one go
@@ -49,8 +49,9 @@ struct ScanResults {
 #define LINK_STATUS_BADAUTH         6       // Auth failed
 
 // Flags used in PaulaNETSettings
+#define FLAGS_FROM_DRIVER        (1<<6)         // Bit set to signal that this request came from the driver not the config tool 
 #define FLAGS_AMIGA_COMPRESSION  (1<<1)         // Set to make the Amiga apply RLE compression on data is transmits to the Pico, else MFM
-#define FLAGS_PICO_COMPRESSION  (1<<0)          // Set to make the Pico apply RLE compression on data is transmits to the Pico, else MFM
+#define FLAGS_PICO_COMPRESSION   (1<<0)         // Set to make the Pico apply RLE compression on data is transmits to the Pico, else MFM
 
 // Settings saved on the PaulaNET device
 struct PaulaNETSettings {

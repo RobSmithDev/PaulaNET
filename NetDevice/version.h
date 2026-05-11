@@ -5,6 +5,6 @@
 #define DEVICEREVISION 0
 #define DEVICEEXTRA
 
-#define DEVICEDATE     2026-05-10
+#define DEVICEDATE     2026-05-11
 
 #endif

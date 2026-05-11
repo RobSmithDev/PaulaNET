@@ -1,12 +1,3 @@
-/*
-  debug.h
-
-  (C) 2018 Henryk Richter <henryk.richter@gmx.net>
-
-  Debugging Macros
-
-
-*/
 #ifndef _INC_DEBUG_H
 #define _INC_DEBUG_H
 
@@ -17,7 +8,7 @@ extern void KPrintF(char *, ...), KGetChar(void);
 
 #else  /* DEBUG */
 
-//#define D(x)
+#define D(x)
 
 #endif /* DEBUG */
 

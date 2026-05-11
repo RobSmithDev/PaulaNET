@@ -71,7 +71,11 @@ int main()
     std::wstring path = std::wstring(tmp) + L"\\..\\";
 
     addFile(path + L"AmigaConfig\\out\\a.exe", "PaulaNET Config", vol);   // Add the config program
-    addFile(path + L"MakeDiskImage\\PaulaNetConfig.info", "PaulaNET Config.info", vol);   // Add the config program
+    addFile(path + L"MakeDiskImage\\PaulaNet Config.info", "PaulaNET Config.info", vol);   // Add the config program
+    addFile(path + L"MakeDiskImage\\Disk.info", "disk.info", vol);   // Add the Disk Icon
+    addFile(path + L"NetDevice\\PaulaNET.device", "PaulaNET.device", vol);   // Add the driver
+    addFile(path + L"MakeDiskImage\\PaulaNET.device.info", "PaulaNET.device.info", vol);   // Add the driver icon
+
     
 
     // Add icons
@@ -159,7 +163,8 @@ int main()
     switchStatement.push_back("}");
 
 
-    fle = CreateFile(L"..\\Pico\\PaulaNET\\DiskImage.cpp", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    fle = CreateFile(std::wstring(path + L"Pico\\PaulaNET\\DiskImage.cpp").c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    assert(fle != INVALID_HANDLE_VALUE);
     for (const std::string& s : fileout) {
         std::string s2 = s + "\r\n";
         WriteFile(fle, s2.data(), s2.length(), &read, NULL);

@@ -1,16 +1,17 @@
 /*
- * SCSI DaynaPORT Device (scsidayna.device) Copyright (C) 2024-2026 RobSmithDev 
- *
- *
- * Originally based on the MNT ZZ9000 Network Driver Copyright (C) 2016-2023, Lukas F. Hartmann <lukas@mntre.com>
- *          which was Based on code copyright (C) 2018 Henryk Richter <henryk.richter@gmx.net>
- * Released under GPLv3+ with permission.
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
- * GNU General Public License v3.0 or later
- *
- * https://spdx.org/licenses/GPL-3.0-or-later.html
- */
+
+_____             _       _   _ ___________ 
+|  __ \          | |     | \ | |  ___|_   _|
+| |__) |___ _   _| | __ _|  \| | |__   | |  
+|  ___/ _` | | | | |/ _` | . ` |  __|  | |  
+| |  | (_| | |_| | | (_| | |\  | |___  | |  
+|_|   \__,_|\__,_|_|\__,_|_| \_|_____| |_|  
+
+  PaulaNET - Amiga WiFi via the Floppy Port
+  Using Paula's DMA for what she never intended
+  Copyright (C) 2026 RobSmithDev
+
+*/
 
 #define DEVICE_MAIN
 
@@ -56,7 +57,7 @@ const UWORD dev_supportedcmds[] = { NSCMD_DEVICEQUERY, CMD_READ, CMD_WRITE, /*S2
 #include <stdio.h>
 #include <stdlib.h>
 
-#define _DEBUG
+//#define _DEBUG
 
 __saveds void frame_proc();
 char *frame_proc_name = "PaulaNETPacketScheduler";
@@ -713,8 +714,8 @@ __saveds void frame_proc() {
 
 	ULONG recv = 0;
 		
-	// Change task priority
-	//if (settings->taskPriority != 0) SetTaskPri((struct Task*)db->db_Proc,settings->taskPriority);      
+	// Raise priority slightly
+	SetTaskPri((struct Task*)db->db_Proc,1);      
 	struct timeval timeLastWifiCheck = {0UL,0UL};
 	struct timeval timeWifiCheck = {0UL,0UL};
 
@@ -727,9 +728,8 @@ __saveds void frame_proc() {
 		// Every 5 seconds check WIFI status and fetch settings
 		if (abs(timeWifiCheck.tv_secs-timeLastWifiCheck.tv_secs)>=5) {			
 			struct LiveStatus status;
-			/*if (paulaNetGetStatus(device, &status)) {
+			if (paulaNetGetStatus(device, &status)) {
 				paulaNetGetConfig(device, &settings);
-				paulaNetIsDataWaiting(device); // force the right track
 
 				BOOL wasOnline = db->db_online;
 				db->db_online = (status.linkStatus == LINK_STATUS_NONET) || (status.linkStatus == LINK_STATUS_UP) || (status.linkStatus == LINK_STATUS_NOIP) || (status.linkStatus == LINK_STATUS_JOIN);
@@ -749,7 +749,7 @@ __saveds void frame_proc() {
 						DoEvent(db, S2EVENT_ONLINE);
 					}
 				}
-			}*/
+			}
 			timeLastWifiCheck.tv_secs = timeWifiCheck.tv_secs;
 		}
 		

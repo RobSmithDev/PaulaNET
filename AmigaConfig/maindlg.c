@@ -393,7 +393,7 @@ void runSettingsWindow(APTR device) {
                             struct StringInfo *si = (struct StringInfo *)igad->SpecialInfo;
                             LONG val = si->LongInt;
                             if (val < MIN_TRANSFER_SIZE)  val = MIN_TRANSFER_SIZE;
-                            if (val > MAX_TRANSFER_SIZE) val = MAX_TRANSFER_SIZE;
+                            if (val > MAX_TRANSFER_SIZE-256) val = MAX_TRANSFER_SIZE-256;
                             GT_SetGadgetAttrs(igad, window, NULL, GTIN_Number, (ULONG)val, TAG_END);
                         }
                         break;
