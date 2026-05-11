@@ -69,7 +69,7 @@ All floppy signals are brought out to the Pico's GPIO pins. Gerber files for the
 
 ### Comparison with PlipBox
 
-                        | PaulaNet      | PlipBox                              |
+|                       | PaulaNet      | PlipBox                              |
 |-----------------------|---------------|--------------------------------------|
 | Connection            | Floppy port   | Parallel port                        |
 | Throughput            | ~43 KB/s      | ~30–60 KB/s (faster with better CPU) |
