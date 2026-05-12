@@ -753,15 +753,12 @@ __saveds void frame_proc() {
 			timeLastWifiCheck.tv_secs = timeWifiCheck.tv_secs;
 		}
 		
-		UBYTE morePackets = 0;
 		if (db->db_online) {			
 			USHORT counter = 0; 
 			
-			recv = SetSignal(0L, 0L);	
-			
+			recv = SetSignal(0L, 0L);				
 			if (!(recv & SIGBREAKF_CTRL_C)) {
-				morePackets = paulaNetReceivePackets(device, db, (PacketReceivedCallback)onPacketReceived);
-				if (morePackets == DEVICESTATUS_ERROR) D(("ERROROORORO"));				
+				paulaNetReceivePackets(device, db, (PacketReceivedCallback)onPacketReceived);				
 			}
 			
 			// Transmit

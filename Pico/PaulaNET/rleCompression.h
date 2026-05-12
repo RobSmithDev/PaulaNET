@@ -16,7 +16,7 @@ _____             _       _   _ ___________
 #ifndef RLE_COMPRESSION
 #define RLE_COMPRESSION
 
-#define RUN_BUFFER_SIZE   1600                // Max size of data that can be compressed and size of run buffer needed
+#define RUN_BUFFER_SIZE   2048                // Max size of data that can be compressed and size of run buffer needed or LZ4 compressor
 
 
 // Returns a guess as to the size of buffer needed to hold compressed data in a worse case situation
@@ -33,5 +33,8 @@ uint16_t rleDecompress(const uint8_t* src, uint16_t srclen, uint8_t* dst, uint16
 
 // Works out the space needed to decompress a buffer
 uint16_t rleCalcDecompressSize(const uint8_t* src, uint16_t srclen);
+
+// Experimental LZ4 compressor
+size_t lz4Compress(const uint8_t* src, uint16_t srcLen, uint8_t* dst, bool wordSwap, uint16_t* hashBuffer);
 
 #endif

@@ -87,7 +87,7 @@ PaulaNet's DMA-based approach means CPU speed has minimal impact on transfer per
 
 Requires the Raspberry Pi Pico SDK 2.2.0 or later.
 
-Flash the resulting `.uf2` to the Pico via BOOTSEL mode or `picotool`.
+Flash the resulting `.uf2` to the Pico via BOOTSEL mode (hold BOOTSEL button while powering up then drag-drop the uf2 file to the drive that appeared) or `picotool`.
 
 ### Amiga Software
 

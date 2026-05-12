@@ -36,10 +36,10 @@ _____             _       _   _ ___________
 /*
 PaulaNET Protocol is:
 
-Track 0..79: Normal Amiga Disk
-Track 80:    Access Points
-Track 81:    Config
-Track 82:    Ethernet
+Track 0..74, 78+: Normal Amiga Disk
+Track 75:    Access Points
+Track 76:    Config
+Track 77:    Ethernet
 
 Head Selection:
     Lower Side:     Receive  data from Amiga  (Core1)      Amiga -> Pico
@@ -1303,7 +1303,7 @@ int main() {
         handleWIFI();
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, !isMotorActive);   // LED onboard goes off when motor is active        
 #ifdef DEBUGGING
-        static int lastTrack = -1;
+    /*    static int lastTrack = -1;
         if (lastTrack != track) {
            lastTrack = track;
            switch (paulaMode) {
@@ -1312,9 +1312,9 @@ int main() {
             case dmEthernet:safePrintf("Track Changed to: %i  ETH\n", lastTrack );break;
             case pmDisk:safePrintf("Track Changed to: %i  DISK\n", lastTrack );break;
             default: safePrintf("Track Changed to: %i  ??\n", track );break;
-           }
-           
+           }           
         }
+           */
 #endif        
 
         // Wifi scan
@@ -1394,8 +1394,10 @@ int main() {
                 uint8_t* outputPosition = &compressedRxQueue.packets[compressedRxQueue.writeIndex].data[sizeof(CompressionHeader) * 2];
                 // Prep compress and encode each packet for transmission
                 if (settings.flags & FLAGS_PICO_COMPRESSION) {
+                    // Experimental LZ4 compressor
+                    //compressedRxQueue.packets[compressedRxQueue.writeIndex].length = lz4Compress(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, outputPosition, true, (uint16_t*)Core0RunBuffer);
                     compressedRxQueue.packets[compressedRxQueue.writeIndex].length = rleCompress(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, outputPosition, true, Core0RunBuffer);
-                    hdr.compressedSize = SWAP16(compressedRxQueue.packets[compressedRxQueue.writeIndex].length);                    
+                    hdr.compressedSize = SWAP16(compressedRxQueue.packets[compressedRxQueue.writeIndex].length);
                     // WORD padding
                     if (compressedRxQueue.packets[compressedRxQueue.writeIndex].length&1) {
                         *(outputPosition+compressedRxQueue.packets[compressedRxQueue.writeIndex].length) = 0;

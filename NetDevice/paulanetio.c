@@ -26,7 +26,6 @@ _____             _       _   _ ___________
 #include <stdio.h>
 #include <stdlib.h>
 
-// #define DEBUGGING 1
 #include "debug.h"
 
 typedef UBYTE DataMode;
@@ -34,7 +33,7 @@ typedef UBYTE DataMode;
 #define dmConfig                2
 #define dmEthernet              3
 
-#define PAULA_INDEX_PADDING      128         
+#define PAULA_INDEX_PADDING      64         
 #define PAULA_WRITE_PADDING      (4+2)    // (write padding in bytes, 4 for the two sync)
 #define CHIPBUFFER_SIZE          (MAX_TRANSFER_SIZE + (PAULA_INDEX_PADDING<<2))
 
@@ -47,6 +46,8 @@ typedef UBYTE DataMode;
 #define TRACK_WRITE              0          // Lower side TRANSMIT TO PICO
 
 #define COMPRESSION_WORSTCASE    (((ETH_MTU+127)/127)+2)
+
+#define LZ4_MIN_MATCH       4
 
 #define TRACK_OFFSET(track, side) ((track<<1) + side)
 #define TRACK_SEEK_OFFSET(track, side) (((track<<1) + side) * NUMSECS * TD_SECTOR)
@@ -100,33 +101,51 @@ struct CompressionHeader {
     UWORD originalSize;    
 };
 
+static const UWORD stuffChar[] = {0x16c0, 0x4e75};	
+#ifdef DEBUG    
+void ssprintf(struct PaulaNET* dev, const char *messageFormat, char* buf, ...) {
+    va_list args;
+    va_start(args, buf);  /* FIX: last named param before ... is buf, not messageFormat */
+    RawDoFmt((STRPTR)messageFormat, (APTR)args, (void (*)(void))stuffChar, buf);
+    va_end(args);
+}
 
-#ifdef DEBUGGING
-void hexDump(BPTR out, const void* data, ULONG length) {
+void hexDump(struct PaulaNET* out, const void* data, ULONG length) {
     const UBYTE* p = (const UBYTE*)data;
+    char buffer[160];  /* slightly larger to be safe */
+    char tmp[32];
     ULONG i, j;
     for (i = 0; i < length; i += 16) {
-        FPrintf(out, "%04lx: ", i);
+        buffer[0] = '\0';
+        ssprintf(out, "%04lx: ", tmp, i);
+        strcat(buffer, tmp);
         for (j = 0; j < 16; j++) {
-            if (i + j < length)
-                FPrintf(out, "%02lx ", (ULONG)p[i+j]);
-            else
-                FPrintf(out, "   ");
+            if (i + j < length) {
+                ssprintf(out, "%02lx ", tmp, (ULONG)p[i+j]);
+                strcat(buffer, tmp);
+            } else strcat(buffer, "   ");             
         }
-        FPrintf(out, " ");
+
+        strcat(buffer, " ");
         for (j = 0; j < 16 && i + j < length; j++) {
             UBYTE c = p[i+j];
-            FPrintf(out, "%lc", (ULONG)(c >= 32 && c < 127 ? c : '.'));
+            tmp[0] = (c >= 32 && c < 127) ? (char)c : '.';
+            tmp[1] = '\0';
+            strcat(buffer, tmp);
         }
-        FPrintf(out, "\n");
+
+        strcat(buffer, "\n");
+        D((buffer));
     }
 }
 #endif
 
+
+
 // Formatted logging to console window
-static const UWORD stuffChar[] = {0x16c0, 0x4e75};
+
 static void logMessagef(struct PaulaNET* dev, const char *messageFormat, ...) {
-#ifdef DEBUGGING
+#ifdef DEBUG
 	char buf[100];
     va_list args;
     va_start(args, messageFormat);	 
@@ -238,6 +257,55 @@ UWORD rleDecompress(struct PaulaNET* dev, const UBYTE* src, UWORD srclen, UBYTE*
         }
         dstPos += count;
     }
+    return dstPos;
+}
+
+// Decompress LZ4 block format data.
+UWORD lz4Decompress(struct PaulaNET* dev, const UBYTE* src, UWORD srcLen, UBYTE* dst, UWORD dstMax) {
+    UWORD srcPos = 0;
+    UWORD dstPos = 0;
+
+    while (srcPos < srcLen) {
+        // --- Token ---
+        const UBYTE token    = src[srcPos++];
+        UWORD      litLen   = token >> 4;
+        UWORD      matchLen = token & 0x0F;
+
+        // --- Extra literal length ---
+        if (litLen == 15) {
+            UBYTE extra;
+            do { extra = src[srcPos++]; litLen += extra; } while (extra == 255);
+        }
+
+        // --- Literals ---
+        if (dstPos + litLen > dstMax) break;
+        if (srcPos + litLen > srcLen) break;
+        memcpy(&dst[dstPos], &src[srcPos], litLen);
+        srcPos += litLen;
+        dstPos += litLen;
+
+        // --- End of stream: final sequence has no match ---
+        if (srcPos >= srcLen) break;
+
+        // --- Match offset ---
+        if (srcPos + 2 > srcLen) break;
+        const UWORD offset = ((UWORD)src[srcPos] << 8) | ((UWORD)src[srcPos + 1]);
+        srcPos += 2;
+        if (offset == 0 || offset > dstPos) break;  // corrupt
+
+        // --- Extra match length ---
+        matchLen += LZ4_MIN_MATCH;
+        if ((token & 0x0F) == 15) {
+            UBYTE extra;
+            do { extra = src[srcPos++]; matchLen += extra; } while (extra == 255);
+        }
+
+        // --- Match copy (may overlap, so byte-by-byte) ---
+        if (dstPos + matchLen > dstMax) break;
+        const UBYTE* matchSrc = &dst[dstPos - offset];
+        for (UWORD i = 0; i < matchLen; i++) dst[dstPos++] = matchSrc[i];
+    }
+
     return dstPos;
 }
 
@@ -898,9 +966,6 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
         int realDataLength = dataLength;
         if (realDataLength&1) realDataLength++; // has to be even
         if (((UBYTE*)pkt) + realDataLength > (UBYTE*)pktEnd) {
-#ifdef DEBUGGING
-            FPrintf(Output(), "Packet data content past end of buffer\n");
-#endif
             return TRUE;
         }
 
@@ -911,12 +976,11 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
             callback(userContext, (UBYTE*)dev->compressionSpace, cHeader.originalSize);
         } else {
             // Compressed
+            //int res = lz4Decompress(dev, (UBYTE*)pkt, dataLength, (UBYTE*)dev->compressionSpace, CHIPBUFFER_SIZE);
+            //if (res == cHeader.originalSize) {
             if (rleDecompress(dev, (UBYTE*)pkt, dataLength, (UBYTE*)dev->compressionSpace, CHIPBUFFER_SIZE) == cHeader.originalSize) {
                 callback(userContext, (UBYTE*)dev->compressionSpace, cHeader.originalSize);
             } else {
-#ifdef DEBUGGING
-                FPrintf(Output(), "Packet decompressed to wrong size\n");
-#endif
             }
         }
 
