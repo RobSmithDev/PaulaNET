@@ -157,7 +157,11 @@ struct ScanResult {
 };
 ScanResult scanResults[MAX_SCAN_RESULTS]; 
 
+#ifdef PICO_RP2350
 #define PACKET_QUEUE_SIZE   30
+#else
+#define PACKET_QUEUE_SIZE   20
+#endif
 #define ETH_MTU             1518  // 1500 + ethernet header + some margin
 
 // A single packet, as it's sent or received
