@@ -12,7 +12,7 @@ PaulaNet is a WiFi network adapter for the Amiga that uses the floppy disk port 
 
 The Amiga's floppy port provides a 500kbps MFM bitstream driven by Paula's DMA engine. PaulaNet exploits this as a data channel:
 
-- A **Raspberry Pi Pico W** (or Pico 2W) sits between the Amiga's floppy port and the WiFi radio
+- A **Raspberry Pi Pico 2 W** (Original Pico W is not compatable) sits between the Amiga's floppy port and the WiFi radio
 - The Amiga sees PaulaNet as a standard floppy drive (eg DF1:)
 - Special tracks (76, 77 and 78) are used as command/data channels
 - The Pico handles WiFi via the onboard CYW43439 chip and forwards raw ethernet frames to and from the Amiga
@@ -51,7 +51,7 @@ All floppy signals are brought out to the Pico's GPIO pins. Gerber files for the
 
 | Folder             | Contents                                                                   |
 |--------------------|----------------------------------------------------------------------------|
-| `Pico/`            | Raspberry Pi Pico W firmware (C++, CMake)                                  |
+| `Pico/`            | Raspberry Pi Pico 2 W firmware (C++, CMake)                                  |
 | `NetDevice/`       | `PaulaNET.device` Amiga Exec network device driver                         |
 | `AmigaConfig/`     | Workbench configuration program (GadTools UI)                              |
 | `MakeDiskImage/`   | PC-side tool to generate the ADF and export sector data to `DiskImage.cpp` |
@@ -65,7 +65,7 @@ All floppy signals are brought out to the Pico's GPIO pins. Gerber files for the
 - Ping times of **80–120ms** on an unaccelerated Amiga 1200
 - Tested with **Roadshow** TCP/IP stack
 - Works on stock Amiga hardware (no accelerator required)
-- Compatible with Raspberry Pi Pico W and Pico 2W
+- Compatible with Raspberry Pico 2 W Only
 - Workbench mounts the built-in disk image containing the driver and config program automatically
 - WiFi configuration (SSID, password, hostname) stored in Pico flash
 

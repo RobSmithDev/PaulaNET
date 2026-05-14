@@ -129,7 +129,7 @@ uint16_t rleCalcDecompressSize(const uint8_t* src, uint16_t srclen) {
     return dstSize;
 }
 
-
+/*
 
 // Experimental LZ4 compression Pico->Amiga direction only
 
@@ -260,3 +260,5 @@ size_t lz4Compress(const uint8_t* src, uint16_t srcLen, uint8_t* dst, bool wordS
 
     return dstPos;
 }
+
+*/
