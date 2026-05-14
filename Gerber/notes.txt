@@ -1,0 +1,8 @@
+You will require part X2 OR DSUB1
+This should be a 23 Way Male D DB23 Connector
+
+The Pi Pico must be a "Pico 2 W" Only
+
+
+
+RobSmithDev
