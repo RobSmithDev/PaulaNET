@@ -8,6 +8,8 @@
 
 PaulaNet is a WiFi network adapter for the Amiga that uses the floppy disk port as its data interface. It requires no internal hardware modification — just plug into the external floppy connector.
 
+[Watch the Video!](https://youtu.be/AhAg-fT83o8)
+
 ---
 
 ## How It Works
