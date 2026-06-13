@@ -344,7 +344,7 @@ void loadSettings() {
         settings.maxRxSize = 16384-256;
         settings.maxTxSize = 16384-256;
         settings.flags = FLAGS_AMIGA_COMPRESSION | FLAGS_PICO_COMPRESSION;
-        strcpy(settings.hostname, "PaulaNET");
+        strncpy(settings.hostname, "PaulaNET", sizeof(settings.hostname) - 1);
     } else {
         settings = flashSettings->settings;
         // Handle if the data was smaller
@@ -661,7 +661,7 @@ bool handleDataReceived(const PaulaMode mode, const uint32_t bytesReceived) {
                                 break;
                             }
                     }
-                    if (!newPassword) strcpy(inSettings->pwd, settings.pwd);
+                    if (!newPassword) strncpy(inSettings->pwd, settings.pwd, sizeof(inSettings->pwd) - 1);
                     inSettings->flags = SWAP16(inSettings->flags);
 
                     // Check if wifi needs to reconnect
@@ -785,6 +785,11 @@ void preparePacketsToTransmit() {
     int bufferUsed = sizeof(packetHeaderSend)<<1;
 
     while ((compressedRxQueue.readIndex != compressedRxQueue.writeIndex) && ((bufferUsed + compressedRxQueue.packets[compressedRxQueue.readIndex].length) < settings.maxTxSize) && (packetHeaderSend.numPackets < PACKET_QUEUE_SIZE)) {
+        // Validate packet length against source buffer capacity before copying
+        if (compressedRxQueue.packets[compressedRxQueue.readIndex].length > ETH_MTU_MFM_COMPRESSED) {
+            compressedRxQueue.readIndex = (compressedRxQueue.readIndex + 1) % PACKET_QUEUE_SIZE;
+            continue;
+        }
         // Copy the packet                
         memcpy(dataPos, compressedRxQueue.packets[compressedRxQueue.readIndex].data, compressedRxQueue.packets[compressedRxQueue.readIndex].length);
         bufferUsed += compressedRxQueue.packets[compressedRxQueue.readIndex].length;
