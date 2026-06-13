@@ -35,6 +35,6 @@ uint16_t rleDecompress(const uint8_t* src, uint16_t srclen, uint8_t* dst, uint16
 uint16_t rleCalcDecompressSize(const uint8_t* src, uint16_t srclen);
 
 // Experimental LZ4 compressor
-//size_t lz4Compress(const uint8_t* src, uint16_t srcLen, uint8_t* dst, bool wordSwap, uint16_t* hashBuffer);
+size_t lz4Compress(const uint8_t* src, uint16_t srcLen, uint8_t* dst, bool wordSwap, uint16_t* hashBuffer, size_t* compressedSize);
 
 #endif

@@ -933,7 +933,8 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
     struct PacketsHeader pkHeader;
     mfmDecode(pkt, sizeof(struct PacketsHeader)*2, (UBYTE*)&pkHeader, sizeof(struct PacketsHeader));
     pkt += sizeof(struct PacketsHeader);
-    UWORD* pktEnd = (UWORD*)(((UBYTE*)pkt) + ((header.dataSize - 4)<<1));
+    //UWORD* pktEnd = (UWORD*)(((UBYTE*)pkt) + ((header.dataSize - 4)<<1));
+    UWORD* pktEnd = (UWORD*)(((UBYTE*)pkt) + header.dataSize - (sizeof(struct PacketsHeader)<<1));
 
     // Skip if we've already seen this data
     if (dev->lastPicoCounter == header.picoCounter) {

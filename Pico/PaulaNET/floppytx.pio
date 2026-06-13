@@ -3,8 +3,8 @@ top:
 .wrap_target
     out x, 1        [14]   ; shift bit into X, burn 15 cycles
     jmp !x no_pulse        ; if X=0, no pulse 1 cycle
-    set pins, 0     [4]    ; 5 cycles high = 256ns
-    set pins, 1     [9]    ; 10 cycles low    
+    set pindirs, 1  [4]    ; 5 cycles high = 256ns
+    set pindirs, 0  [9]    ; 10 cycles low    
     jmp top                ; 1 cycle
 no_pulse:
     nop             [15]   ; burn 16 cycles
@@ -16,8 +16,8 @@ top:
 .wrap_target
     out x, 1        [17]   ; 18 cycles
     jmp !x no_pulse        ; if X=0, no pulse 1 cycle
-    set pins, 0     [4]    ; 5 cycles
-    set pins, 1     [11]   ; 12 cycles
+    set pindirs, 1  [4]    ; 5 cycles
+    set pindirs, 0  [11]   ; 12 cycles
     jmp top                ; 1 cycle
 no_pulse:
     nop             [16]   ; 17 cycles
@@ -28,9 +28,9 @@ no_pulse:
 .program drive_select
 .wrap_target
     wait 0 pin 0        ; wait for SELECT to go low (asserted)
-    set pins, 0         ; immediately assert READY
+    set pindirs, 1      ; immediately assert READY
     wait 1 pin 0        ; wait for SELECT to go high (deasserted)  
-    set pins, 1         ; immediately deassert READY
+    set pindirs, 0     ; immediately deassert READY
 .wrap
 
 

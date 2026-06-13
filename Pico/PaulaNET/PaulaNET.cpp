@@ -50,7 +50,7 @@ Head Selection:
 */
 
 #define MAJOR_VERSION               1
-#define MINOR_VERSION               0
+#define MINOR_VERSION               1
 
 
 #define PIN_LED_PAULAIO           17      // Data from/to paula
@@ -416,8 +416,7 @@ void __not_in_flash_func(pinMonitor)(uint gpio, uint32_t events)  {
         case PIN_SELECT:
             isSelected = (events & GPIO_IRQ_EDGE_FALL) != 0;
             // Motor state is latched on select
-            if (isSelected) isMotorActive = gpio_get(PIN_MOTOR) == 0;            
-            gpio_set_dir(PIN_READDATA, isSelected ? GPIO_OUT : GPIO_IN);
+            if (isSelected) isMotorActive = gpio_get(PIN_MOTOR) == 0;                        
             gpio_set_dir(PIN_TRACK0, isSelected ? GPIO_OUT : GPIO_IN);
             gpio_set_dir(PIN_WRITEPROTECT, isSelected ? GPIO_OUT : GPIO_IN);
             gpio_set_dir(PIN_DISKCHANGE, isSelected ? GPIO_OUT : GPIO_IN);
@@ -491,16 +490,13 @@ void setupDriveSelectPIO(uint selectPin, uint readyPin) {
     
     sm_config_set_in_pins(&c, selectPin);
     sm_config_set_set_pins(&c, readyPin, 1);
-    
-    // Full speed - we want minimum latency
     sm_config_set_clkdiv(&c, 1.0f);
     
     pio_gpio_init(pioDriveSelect.pio, readyPin);
-    pio_sm_set_consecutive_pindirs(pioDriveSelect.pio, pioDriveSelect.sm, readyPin, 1, true);  // ready = output
-    // selectPin stays as input, no pindirs change needed
+    pio_sm_set_pins_with_mask(pioDriveSelect.pio, pioDriveSelect.sm, 0, 1u << readyPin);
+    pio_sm_set_consecutive_pindirs(pioDriveSelect.pio, pioDriveSelect.sm, readyPin, 1, false);
     
     pio_sm_init(pioDriveSelect.pio, pioDriveSelect.sm, offset, &c);
-    pio_sm_exec(pioDriveSelect.pio, pioDriveSelect.sm, pio_encode_set(pio_pins, 1));
     pio_sm_set_enabled(pioDriveSelect.pio, pioDriveSelect.sm, true);
 }
 
@@ -775,7 +771,7 @@ void preparePacketsToTransmit() {
         return;
     }
     lastPicoCounter++;
-
+ 
     // Pointer to whre data starts
     uint8_t* headerStart = (uint8_t*)&PacketBackup[ PAULA_INDEX_PADDING + 4];
     uint8_t* dataStart = headerStart +  (sizeof(DataHeader)*2);
@@ -1013,18 +1009,22 @@ uint32_t readFromPaula() {
 void setupWritingPIO(uint pin) {
 #ifdef PICO_RP2350
     uint offset = pio_add_program(pioFloppyTX.pio, &floppy_tx_pico2_program);
+    pio_sm_config c = floppy_tx_pico2_program_get_default_config(offset);
 #else    
     uint offset = pio_add_program(pioFloppyTX.pio, &floppy_tx_program);
-#endif
     pio_sm_config c = floppy_tx_program_get_default_config(offset);
+#endif
     sm_config_set_out_shift(&c, false, true, 16);  // shift left, autopull, 16 bits
     sm_config_set_set_pins(&c, pin, 1);
     sm_config_set_clkdiv(&c, 8);                   // 125MHz/8 = 15.625MHz
 
-    pio_sm_set_consecutive_pindirs(pioFloppyTX.pio, pioFloppyTX.sm, pin, 1, true);
     pio_gpio_init(pioFloppyTX.pio, pin);
     pio_sm_init(pioFloppyTX.pio, pioFloppyTX.sm, offset, &c);
-    pio_sm_set_enabled(pioFloppyTX.pio, pioFloppyTX.sm, true);
+
+    // After init - output value permanently 0, start high-Z
+    pio_sm_set_pins_with_mask(pioFloppyTX.pio, pioFloppyTX.sm, 0, 1u << pin);
+    pio_sm_set_consecutive_pindirs(pioFloppyTX.pio, pioFloppyTX.sm, pin, 1, false);
+    // Don't enable - only enable when transmitting
 }
 
 // Core 1 MAIN
@@ -1064,12 +1064,17 @@ void core1Main() {
                         while ((currentTrack == track) && (currentSide == isLowerSide()) && (isSelected) && (isMotorActive) && gpio_get(PIN_RESET)) {
                             // Start transmission
                             gpio_put(PIN_INDEX, 0);   // index is used to help sync the data stream
+                            pio_sm_set_consecutive_pindirs(pioFloppyTX.pio, pioFloppyTX.sm, PIN_READDATA, 1, true);
+                            pio_sm_set_enabled(pioFloppyTX.pio, pioFloppyTX.sm, true);
                             dma_channel_configure(dma_chan, &cfg, &pioFloppyTX.pio->txf[pioFloppyTX.sm],IoBuffer,bufferUsed,true);
                             sleep_us(3000);   // wait 3ms, this allows the index to work properly.
                             gpio_put(PIN_INDEX, 1);
                             // Wait for one of these states to change
-                            while ((currentTrack == track) && (currentSide == isLowerSide() && (isSelected) && (isMotorActive) && gpio_get(PIN_RESET) && dma_channel_is_busy(dma_chan)));
+                            while ((currentTrack == track) && (currentSide == isLowerSide()) && (isSelected) && (isMotorActive) && gpio_get(PIN_RESET) && dma_channel_is_busy(dma_chan));
                             dma_channel_abort(dma_chan);
+                            pio_sm_clear_fifos(pioFloppyTX.pio, pioFloppyTX.sm);
+                            pio_sm_set_enabled(pioFloppyTX.pio, pioFloppyTX.sm, false);
+                            pio_sm_set_consecutive_pindirs(pioFloppyTX.pio, pioFloppyTX.sm, PIN_READDATA, 1, false);
                         }
                         gpio_put(PIN_LED_PAULAIO, 0);                                                
                     }
@@ -1109,13 +1114,18 @@ void core1Main() {
                         while ((!isLowerSide()) && (isSelected) && gpio_get(PIN_RESET) && isMotorActive && (currentTrack == track)) {
                             // Start transmission
                             gpio_put(PIN_INDEX, 0);   // index is used to help sync the data stream
+                            pio_sm_set_consecutive_pindirs(pioFloppyTX.pio, pioFloppyTX.sm, PIN_READDATA, 1, true);
+                            pio_sm_set_enabled(pioFloppyTX.pio, pioFloppyTX.sm, true);
                             dma_channel_configure(dma_chan, &cfg, &pioFloppyTX.pio->txf[pioFloppyTX.sm],  (paulaMode == PaulaMode::pmEthernet) ? PacketBackup : IoBuffer,bufferUsed,true);
                             sleep_us(1000);   // wait 1ms, this allows the index to work properly.
                             gpio_put(PIN_INDEX, 1);
 
                             // Wait for one of these states to change
-                            while ((!isLowerSide()) && (isSelected) && dma_channel_is_busy(dma_chan) && gpio_get(PIN_RESET) && isMotorActive && (currentTrack == track));
+                            while ((currentTrack == track) && (!isLowerSide()) && (isSelected) && (isMotorActive) && gpio_get(PIN_RESET) && dma_channel_is_busy(dma_chan));       
                             dma_channel_abort(dma_chan);    
+                            pio_sm_clear_fifos(pioFloppyTX.pio, pioFloppyTX.sm);
+                            pio_sm_set_enabled(pioFloppyTX.pio, pioFloppyTX.sm, false);
+                            pio_sm_set_consecutive_pindirs(pioFloppyTX.pio, pioFloppyTX.sm, PIN_READDATA, 1, false);
                         }                        
                         gpio_put(PIN_LED_PAULAIO, 0);
                     } 
@@ -1399,9 +1409,11 @@ int main() {
                 // Prep compress and encode each packet for transmission
                 if (settings.flags & FLAGS_PICO_COMPRESSION) {
                     // Experimental LZ4 compressor
-                    //compressedRxQueue.packets[compressedRxQueue.writeIndex].length = lz4Compress(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, outputPosition, true, (uint16_t*)Core0RunBuffer);
+                    //size_t realSize;
+                    //compressedRxQueue.packets[compressedRxQueue.writeIndex].length = lz4Compress(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, outputPosition, true, (uint16_t*)Core0RunBuffer, &realSize);
+                    
                     compressedRxQueue.packets[compressedRxQueue.writeIndex].length = rleCompress(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, outputPosition, true, Core0RunBuffer);
-                    hdr.compressedSize = SWAP16(compressedRxQueue.packets[compressedRxQueue.writeIndex].length);
+                    hdr.compressedSize = SWAP16(compressedRxQueue.packets[compressedRxQueue.writeIndex].length/*realSize*/);
                     // WORD padding
                     if (compressedRxQueue.packets[compressedRxQueue.writeIndex].length&1) {
                         *(outputPosition+compressedRxQueue.packets[compressedRxQueue.writeIndex].length) = 0;

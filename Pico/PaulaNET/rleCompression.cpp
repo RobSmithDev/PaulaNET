@@ -129,7 +129,6 @@ uint16_t rleCalcDecompressSize(const uint8_t* src, uint16_t srclen) {
     return dstSize;
 }
 
-/*
 
 // Experimental LZ4 compression Pico->Amiga direction only
 
@@ -195,7 +194,7 @@ static uint16_t emitSequence(uint8_t* dst, uint16_t dstPos, const uint8_t* liter
 // hashBuffer must be LZ4_HASH_SIZE * sizeof(uint16_t) bytes (2KB).
 // Returns compressed size, or 0 on failure (dst too small).
 // wordSwap byte-swaps output words, matching your RLE option.
-size_t lz4Compress(const uint8_t* src, uint16_t srcLen, uint8_t* dst, bool wordSwap, uint16_t* hashBuffer) {
+size_t lz4Compress(const uint8_t* src, uint16_t srcLen, uint8_t* dst, bool wordSwap, uint16_t* hashBuffer, size_t* compressedSize) {
     // Clear hash table (positions default to 0 = unset, we use 0xFFFF as invalid)
     memset(hashBuffer, 0xFF, LZ4_HASH_SIZE * sizeof(uint16_t));
 
@@ -220,7 +219,7 @@ size_t lz4Compress(const uint8_t* src, uint16_t srcLen, uint8_t* dst, bool wordS
             if (read32(&src[ref]) == v) {
                 // Extend match forward
                 uint16_t matchLen = LZ4_MIN_MATCH;
-                uint16_t maxMatch = srcLen - srcPos;
+                uint16_t maxMatch = (srcLen - LZ4_LAST_LITERALS) - srcPos;
                 if (maxMatch > LZ4_LAST_LITERALS) maxMatch -= LZ4_LAST_LITERALS;
                 while (matchLen < maxMatch && src[srcPos + matchLen] == src[ref + matchLen])
                     matchLen++;
@@ -243,22 +242,14 @@ size_t lz4Compress(const uint8_t* src, uint16_t srcLen, uint8_t* dst, bool wordS
     uint16_t finalLitLen = srcLen - litStart;
     dstPos = emitSequence(dst, dstPos, &src[litStart], finalLitLen, 0, 0);
 
-    // Must be even
-    bool dec = false;
-    if (dstPos & 1) {
-        uint8_t i = dst[dstPos];
-        dst[dstPos++] = i;
-        dec = true;
-    }
+    *compressedSize = dstPos;
+    if (dstPos & 1) dst[dstPos++] = 0;
 
     if (wordSwap) {
         uint16_t* p = (uint16_t*)dst;
         for (int i = 0; i < dstPos; i += 2) { *p = (*p >> 8) | (*p << 8); p++; }
     }
 
-    if (dec) dstPos--;
-
     return dstPos;
 }
 
-*/

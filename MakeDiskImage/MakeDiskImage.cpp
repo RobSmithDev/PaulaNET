@@ -77,16 +77,6 @@ int main()
     addFile(path + L"MakeDiskImage\\PaulaNET.device.info", "PaulaNET.device.info", vol);   // Add the driver icon
 
     
-
-    // Add icons
-  //  addFile(L"D:\\PaulaNET\\MakeDiskImage\\MakeDiskImage.cpp", "test2.txt", vol);
-  //  addFile(L"D:\\PaulaNET\\MakeDiskImage\\MakeDiskImage.cpp", "test3.txt", vol);
-  //  addFile(L"D:\\PaulaNET\\MakeDiskImage\\MakeDiskImage.cpp", "test4.txt", vol);
-  //  addFile(L"D:\\PaulaNET\\MakeDiskImage\\MakeDiskImage.cpp", "test5.txt", vol);
-  //  addFile(L"D:\\PaulaNET\\MakeDiskImage\\MakeDiskImage.cpp", "test6.txt", vol);
-  //  addFile(L"D:\\PaulaNET\\MakeDiskImage\\MakeDiskImage.cpp", "test7.txt", vol);
-  //  addFile(L"D:\\PaulaNET\\MakeDiskImage\\MakeDiskImage.cpp", "test8.txt", vol);
-
     adfVolUnMount(vol);
     
     adfDevUnMount(device);
