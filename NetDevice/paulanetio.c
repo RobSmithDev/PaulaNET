@@ -19,6 +19,7 @@ _____             _       _   _ ___________
 #include <devices/trackdisk.h>
 #include "paulanetio.h"
 #include "paulanetstruct.h"
+#include "webadf_lz4.h"           // webadf LZ4: the LZ4 half (MIT; spec 2026-10-18)
 #include <string.h>
 
 #include <proto/exec.h>
@@ -85,6 +86,11 @@ struct PaulaNET {
     UBYTE                       lastPicoCounter;
     UBYTE                       packetCounter;
     BOOL                        ackLastPacketData;
+    struct WlRx                 wlRx;            // webadf LZ4: the batch from the board, decoded back to back
+    struct WlTx                 wlTx;            // webadf LZ4: the batch to the board (68020+)
+    UBYTE*                      wlMem;           // ...one allocation behind both, wlMemSize bytes
+    ULONG                       wlMemSize;
+    UWORD                       wlAttn;          // SysBase->AttnFlags at open
 };
 
 #define SysBase dev->pnSysBase
@@ -538,6 +544,7 @@ void paulaNetClose(APTR device) {
     if (dev->port) DeleteMsgPort((struct MsgPort *)dev->port);
     if (dev->buffer) FreeMem(dev->buffer, CHIPBUFFER_SIZE);
     if (dev->compressionSpace) FreeMem(dev->compressionSpace, CHIPBUFFER_SIZE);
+    if (dev->wlMem) FreeMem(dev->wlMem, dev->wlMemSize);   // webadf LZ4
 
     FreeMem(device, sizeof(struct PaulaNET));
 }
@@ -620,6 +627,17 @@ APTR paulaNetOpen(struct ExecBase *Sysbase, struct DosLibrary *Dosbase, int devi
         paulaNetClose(tmp);        
         return NULL;
     }
+
+    // webadf LZ4 (spec 2026-10-18 §4): its own window and buffers, sized by the CPU -- never Rob's compressionSpace.
+    // MEMF_REVERSE (exec V39+; not passed to older exec) takes it from the top of the memory list, never below
+    // $10000, where lz4_68k would decode every block through its slow checked loop. Without the memory the device
+    // still opens, as Rob's stock driver: no 0x10, so the board sends no LZ4, and nothing LZ4 is decoded or sent.
+    tmp->wlAttn = Sysbase->AttnFlags;
+    tmp->wlMemSize = wl_mem_bytes(tmp->wlAttn);
+    tmp->wlMem = (UBYTE*)AllocMem(tmp->wlMemSize,
+                                  MEMF_PUBLIC | (Sysbase->LibNode.lib_Version >= 39 ? MEMF_REVERSE : 0));
+    if (tmp->wlMem) wl_init(&tmp->wlRx, &tmp->wlTx, tmp->wlMem, tmp->wlAttn);
+    else D(("webadf LZ4: no memory for its %ld bytes, running as Rob's stock driver", tmp->wlMemSize));
 
     // One extra block to backup pacxkets to be sent
     tmp->packetBackup = (UWORD*)AllocMem(CHIPBUFFER_SIZE, MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
@@ -944,6 +962,7 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
 
     // Keep a copy of the last packet counter so we can tell the Pico we received it
     dev->lastPicoCounter = header.picoCounter;
+    if (dev->wlMem) wl_rx_begin(&dev->wlRx);   // webadf LZ4: this batch's window starts empty
     
     struct CompressionHeader cHeader;    
     for (int i=0; i<pkHeader.numPackets; i++) {
@@ -963,7 +982,7 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
             return TRUE;
         }
         
-        int dataLength = cHeader.compressedSize & 0x7FFF;
+        int dataLength = dev->wlMem ? wl_wire_bytes(cHeader.compressedSize) : (cHeader.compressedSize & 0x7FFF);   // webadf LZ4: 0xC000|n is 2n bytes on the wire
         int realDataLength = dataLength;
         if (realDataLength&1) realDataLength++; // has to be even
         if (((UBYTE*)pkt) + realDataLength > (UBYTE*)pktEnd) {
@@ -972,10 +991,17 @@ BOOL paulaNetReceivePackets(APTR device, APTR userContext, PacketReceivedCallbac
 
         // Decode buffer        
         if (cHeader.compressedSize & 0x8000) {
-            // MFM encoded
-            mfmDecode(pkt, dataLength, (UBYTE*)dev->compressionSpace, CHIPBUFFER_SIZE);            
-            callback(userContext, (UBYTE*)dev->compressionSpace, cHeader.originalSize);
+            // MFM, or (webadf LZ4) an MFM-encoded LZ4 block: decoded into this batch's window
+            const UBYTE* wlFrame;
+            if (dev->wlMem) {
+                wlFrame = wl_rx_frame(&dev->wlRx, cHeader.compressedSize, (const UBYTE*)pkt, cHeader.originalSize);
+            } else {   // no LZ4 memory: Rob's own decode
+                mfmDecode(pkt, dataLength, (UBYTE*)dev->compressionSpace, CHIPBUFFER_SIZE);
+                wlFrame = (const UBYTE*)dev->compressionSpace;
+            }
+            if (wlFrame) callback(userContext, (UBYTE*)wlFrame, cHeader.originalSize);
         } else {
+            if (dev->wlMem) wl_rx_break(&dev->wlRx);   // webadf LZ4: raw RLE decodes outside the window; nothing may link past it
             // Compressed
             //int res = lz4Decompress(dev, (UBYTE*)pkt, dataLength, (UBYTE*)dev->compressionSpace, CHIPBUFFER_SIZE);
             //if (res == cHeader.originalSize) {
@@ -1002,6 +1028,10 @@ BOOL paulaNetBeginTransmitPackets(APTR device) {
     dev->compressionMode = (dev->settings.flags & FLAGS_AMIGA_COMPRESSION)!=0;
     dev->writePosition = (UWORD*)(((UBYTE*)&dev->packetBackup[2]) + sizeof(struct DataHeader) + (sizeof(struct PacketsHeader)<<1));
     dev->packetCounter = 0; // temp storage for packet counter
+    // webadf LZ4: LZ4 uploads on 68020+ when status byte 155 says the board takes them -- and only in place of RLE:
+    // with Rob's FLAGS_AMIGA_COMPRESSION off (MFM uploads) the batch stays MFM, so the gate is closed as well.
+    // Without its memory (open could not allocate it) the gate is closed too.
+    wl_tx_begin(&dev->wlTx, (dev->compressionMode && dev->wlMem) ? dev->status.reserved : 0);
     dev->spaceRemaining = dev->settings.maxTxSize - (sizeof(struct CompressionHeader)<<1) - (((UBYTE*)dev->writePosition) - ((UBYTE*)dev->packetBackup));
     if (dev->compressionMode) dev->spaceRemaining-=COMPRESSION_WORSTCASE; else dev->spaceRemaining>>=1;
     return TRUE;
@@ -1019,10 +1049,15 @@ BOOL paulaNetAddPacket(APTR device, void* data, UWORD packetLength) {
     struct CompressionHeader hdr;
     hdr.originalSize = packetLength;
     if (dev->compressionMode) {
-        hdr.compressedSize = rleCompress(dev, (UBYTE*)data, packetLength, (UBYTE*)&dev->writePosition[sizeof(struct CompressionHeader)], (UBYTE*)dev->compressionSpace) | 0x8000;
+        UBYTE* wlBody = (UBYTE*)&dev->writePosition[sizeof(struct CompressionHeader)];
+        hdr.compressedSize = rleCompress(dev, (UBYTE*)data, packetLength, wlBody, (UBYTE*)dev->compressionSpace);
+        // webadf LZ4 (68020+, a board that takes it): the linked block replaces the RLE when it is shorter
+        UWORD wlZ = wl_tx_frame(&dev->wlTx, (const UBYTE*)data, packetLength, wlBody, hdr.compressedSize);
+        hdr.compressedSize = wlZ ? (UWORD)(WL_SIZE_LZ4 | wlZ) : (UWORD)(hdr.compressedSize | 0x8000);
         UWORD lastBit=0;
         mfmEncode((UBYTE*)&hdr, sizeof(hdr), (UWORD*)dev->writePosition, &lastBit);
-        hdr.compressedSize &= 0x7FFF;
+        // webadf LZ4: an LZ4 block is already padded to even by wl_tx_frame, so it never takes the odd-pad path below
+        hdr.compressedSize = wlZ ? (UWORD)((wlZ + 1) & ~1) : (UWORD)(hdr.compressedSize & 0x7FFF);
     } else {        
         UWORD lastBit=0;
         hdr.compressedSize = packetLength<<1;
@@ -1071,7 +1106,7 @@ BOOL paulaNetTransmitPackets(APTR device) {
     header->dataSize = ((UBYTE*)dev->writePosition) - ((UBYTE*)&header[1]);
     header->compressedSize = header->dataSize;
     header->dataMode = dmEthernet;
-    header->compressed = 2;
+    header->compressed = 2 | (dev->wlMem ? WL_DRIVER_LZ4 : 0);   // webadf LZ4: "I decode LZ4" (0x10), with its memory
 #ifdef DRIVERMODE    
     header->compressed |= FLAGS_FROM_DRIVER;
 #endif     
