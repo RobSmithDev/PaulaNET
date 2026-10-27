@@ -15,6 +15,8 @@ DEVICEID=PaulaNET.device
 DEFINES = -DDRIVER 
 ASMDEFS = #
 CPU = 68000
+# webadf LZ4 (spec 2026-10-18 §4): the LZ4 half (webadf_lz4.c) and the 68000 codec (m68k/lz4, MIT)
+ASMOBJECTS = webadf_lz4.o lz4_68k.o
 
 DEVICEID2=
 
@@ -23,6 +25,9 @@ DEVICEID2=
 # 
 ###############################################################################
 include Common.mk
+
+lz4_68k.o : lz4_68k.asm
+	$(VASM) $(VASMFORMAT) -o $@ $<
 
 
 
