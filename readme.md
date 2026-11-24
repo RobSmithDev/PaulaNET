@@ -97,7 +97,7 @@ Flash the resulting `.uf2` to the Pico via BOOTSEL mode (hold BOOTSEL button whi
 
 ### Amiga Software
 
-Built using the [Bartman GCC Amiga toolchain](https://github.com/bebbo/amiga-gcc). Open the relevant folder in VS Code with the Amiga debug extension installed.
+Built using the [Working GCC Amiga toolchain](https://github.com/PTz0uAH/amiga-gcc). Open the relevant folder in VS Code with the Amiga debug extension installed.
 Driver uses the VBCC compiler
 
 ---
