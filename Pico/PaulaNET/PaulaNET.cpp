@@ -1407,28 +1407,16 @@ int main() {
                 hdr.originalSize = SWAP16(rxQueue.packets[rxQueue.readIndex].length);
                 uint8_t* outputPosition = &compressedRxQueue.packets[compressedRxQueue.writeIndex].data[sizeof(CompressionHeader) * 2];
                 // Prep compress and encode each packet for transmission
-                if (settings.flags & FLAGS_PICO_COMPRESSION) {
-                    // Experimental LZ4 compressor
-                    //size_t realSize;
-                    //compressedRxQueue.packets[compressedRxQueue.writeIndex].length = lz4Compress(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, outputPosition, true, (uint16_t*)Core0RunBuffer, &realSize);
-                    
-                    compressedRxQueue.packets[compressedRxQueue.writeIndex].length = rleCompress(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, outputPosition, true, Core0RunBuffer);
-                    hdr.compressedSize = SWAP16(compressedRxQueue.packets[compressedRxQueue.writeIndex].length/*realSize*/);
-                    // WORD padding
-                    if (compressedRxQueue.packets[compressedRxQueue.writeIndex].length&1) {
-                        *(outputPosition+compressedRxQueue.packets[compressedRxQueue.writeIndex].length) = 0;
-                        compressedRxQueue.packets[compressedRxQueue.writeIndex].length++;
-                    }
-                    uint16_t lastBit = 0;
-                    mfmEncode((uint8_t*)&hdr, sizeof(hdr), (uint16_t*)compressedRxQueue.packets[compressedRxQueue.writeIndex].data, &lastBit);
-                } else {
-                    compressedRxQueue.packets[compressedRxQueue.writeIndex].length = rxQueue.packets[rxQueue.readIndex].length << 1; 
-                    hdr.compressedSize = SWAP16(compressedRxQueue.packets[compressedRxQueue.writeIndex].length | 0x8000);  // MFM
-                    // Encode the header
-                    uint16_t lastBit = 0;
-                    mfmEncode((uint8_t*)&hdr, sizeof(hdr), (uint16_t*)compressedRxQueue.packets[compressedRxQueue.writeIndex].data, &lastBit);
-                    mfmEncode(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, (uint16_t*)outputPosition, &lastBit);                     
-                }
+                // Always MFM toward the Amiga. RLE bytes sent raw carry zero-bit runs of up to ~30 cells (MFM has at
+                // most 3), and Paula misreads them: with this driver on an A500, every full-length read of such a
+                // batch failed its checksum (640 of 640) and the link stalled; MFM-encoded, 78 of 79 read first time
+                // and none failed (webadf, 2026-10-17). The driver already decodes MFM (bit 15 of the size).
+                compressedRxQueue.packets[compressedRxQueue.writeIndex].length = rxQueue.packets[rxQueue.readIndex].length << 1;
+                hdr.compressedSize = SWAP16(compressedRxQueue.packets[compressedRxQueue.writeIndex].length | 0x8000);  // MFM
+                // Encode the header
+                uint16_t lastBit = 0;
+                mfmEncode((uint8_t*)&hdr, sizeof(hdr), (uint16_t*)compressedRxQueue.packets[compressedRxQueue.writeIndex].data, &lastBit);
+                mfmEncode(rxQueue.packets[rxQueue.readIndex].data, rxQueue.packets[rxQueue.readIndex].length, (uint16_t*)outputPosition, &lastBit);
                 compressedRxQueue.packets[compressedRxQueue.writeIndex].length += sizeof(CompressionHeader)*2;
                 __dmb();
                 compressedRxQueue.writeIndex = (compressedRxQueue.writeIndex + 1) % PACKET_QUEUE_SIZE;
